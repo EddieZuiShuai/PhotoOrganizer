@@ -106,6 +106,7 @@ enum ResultTab: Hashable, Identifiable {
     case duplicate
     case similar
     case blurry
+    case large
     case content(ContentCategory)
 
     var id: String {
@@ -114,6 +115,7 @@ enum ResultTab: Hashable, Identifiable {
         case .duplicate: return "duplicate"
         case .similar: return "similar"
         case .blurry: return "blurry"
+        case .large: return "large"
         case .content(let c): return "c-" + c.rawValue
         }
     }
@@ -124,6 +126,7 @@ enum ResultTab: Hashable, Identifiable {
         case .duplicate: return "重复"
         case .similar: return "相似"
         case .blurry: return "模糊"
+        case .large: return "大文件"
         case .content(let c): return c.rawValue
         }
     }
@@ -134,6 +137,7 @@ enum ResultTab: Hashable, Identifiable {
         case .duplicate: return "doc.on.doc"
         case .similar: return "square.stack.3d.up"
         case .blurry: return "camera.filters"
+        case .large: return "internaldrive"
         case .content(let c): return c.icon
         }
     }
@@ -328,6 +332,11 @@ struct ResultView: View {
     let result: AnalysisResult
     let onRestart: () -> Void
 
+    /// 全量 id → 照片。跨分类选中、跨分类删除都靠它，保证「切分类不丢选中」。
+    private let itemIndex: [String: PhotoItem]
+    /// 按体积从大到小预排好，避免每次刷新都重排几万张
+    private let sortedBySize: [PhotoItem]
+
     @State private var tab: ResultTab = .suggested
     @State private var selectedIDs: Set<String> = []
     @State private var deletedIDs: Set<String> = []
@@ -339,10 +348,40 @@ struct ResultView: View {
     @State private var message: String?
     @State private var toast: String?
 
+    // 筛选（时间段 / 相册）
+    @State private var period: TimeWindow = .all
+    @State private var albumChoice: AlbumOption?
+    @State private var albumIDs: Set<String>?
+    @State private var albumOptions: [AlbumOption] = []
+    @State private var showFilter = false
+
+    // 附加面板
+    @State private var showDashboard = false
+    @State private var showTriage = false
+
+    // 视频压缩
+    @State private var compressingID: String?
+    @State private var confirmCompress: PhotoItem?
+
+    init(result: AnalysisResult, onRestart: @escaping () -> Void) {
+        self.result = result
+        self.onRestart = onRestart
+        var map: [String: PhotoItem] = [:]
+        map.reserveCapacity(result.items.count)
+        for item in result.items {
+            map[item.id] = item
+        }
+        self.itemIndex = map
+        self.sortedBySize = result.items
+            .filter { $0.fileSize > 0 }
+            .sorted { $0.fileSize > $1.fileSize }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
             chips
+            filterBar
 
             ScrollView {
                 LazyVStack(spacing: 10) {
@@ -355,8 +394,8 @@ struct ResultView: View {
         .overlay(alignment: .bottom) {
             bottomArea
         }
-        .onChange(of: tab) { _ in
-            selectedIDs.removeAll()
+        .overlay {
+            compressingOverlay
         }
         .alert("出错了", isPresented: Binding(
             get: { message != nil },
@@ -366,18 +405,75 @@ struct ResultView: View {
         } message: {
             Text(message ?? "")
         }
+        .confirmationDialog(
+            "压缩这段视频？",
+            isPresented: Binding(
+                get: { confirmCompress != nil },
+                set: { if !$0 { confirmCompress = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("开始压缩") {
+                if let item = confirmCompress {
+                    confirmCompress = nil
+                    startCompress(item)
+                }
+            }
+            Button("取消", role: .cancel) { confirmCompress = nil }
+        } message: {
+            Text("转成 720p 后写入相册新文件，原片移到「最近删除」，30 天内可恢复。大视频要几分钟，期间别锁屏。")
+        }
+        .onChange(of: albumChoice) { choice in
+            reloadAlbumIDs(choice)
+        }
         .fullScreenCover(isPresented: $showPreview) {
-            PhotoPreviewView(items: previewItems, startIndex: previewStart) { item in
+            PhotoPreviewView(
+                items: previewItems,
+                startIndex: previewStart,
+                selectedIDs: $selectedIDs
+            ) { item in
                 deleteItems([item])
             }
         }
+        .sheet(isPresented: $showFilter) {
+            FilterSheet(period: $period, album: $albumChoice, albums: albumOptions)
+        }
+        .sheet(isPresented: $showDashboard) {
+            SpaceDashboardView(
+                totalBytes: totalBytes,
+                photoBytes: photoBytes,
+                videoBytes: videoBytes,
+                suggestedBytes: suggestedBytes,
+                duplicateWasteBytes: duplicateWasteBytes,
+                freedBytes: freedBytes,
+                deletedCount: deletedIDs.count,
+                categoryRows: categoryRows,
+                onGoLarge: { tab = .large }
+            )
+        }
+        .sheet(isPresented: $showTriage) {
+            SwipeTriageView(title: tab.title, items: currentList()) { marks in
+                guard !marks.isEmpty else { return }
+                selectedIDs.formUnion(marks)
+                showToast("已标记 \(marks.count) 张，点下面红色按钮统一删除")
+            }
+        }
+        .onAppear(perform: loadAlbums)
         .animation(.easeInOut(duration: 0.2), value: toast)
     }
 
     // MARK: 数据
 
+    private func passes(_ item: PhotoItem) -> Bool {
+        guard period.contains(item.creationDate) else { return false }
+        if let ids = albumIDs {
+            return ids.contains(item.id)
+        }
+        return true
+    }
+
     private func alive(_ group: PhotoGroup) -> PhotoGroup? {
-        let items = group.items.filter { !deletedIDs.contains($0.id) }
+        let items = group.items.filter { !deletedIDs.contains($0.id) && passes($0) }
         guard items.count > 1 else { return nil }
         return PhotoGroup(items: items, isExactDuplicate: group.isExactDuplicate)
     }
@@ -391,27 +487,37 @@ struct ResultView: View {
     }
 
     private var suggested: [PhotoItem] {
-        result.suggestedItems.filter { !deletedIDs.contains($0.id) }
+        result.suggestedItems.filter { !deletedIDs.contains($0.id) && passes($0) }
     }
 
     private var blurry: [PhotoItem] {
-        result.blurryItems.filter { !deletedIDs.contains($0.id) }
+        result.blurryItems.filter { !deletedIDs.contains($0.id) && passes($0) }
     }
 
     private var shots: [PhotoItem] {
-        result.screenshotItems.filter { !deletedIDs.contains($0.id) }
+        result.screenshotItems.filter { !deletedIDs.contains($0.id) && passes($0) }
     }
 
     private var receiptCount: Int {
-        (result.categoryBuckets[.receipt] ?? []).filter { !deletedIDs.contains($0.id) }.count
+        (result.categoryBuckets[.receipt] ?? []).filter { !deletedIDs.contains($0.id) && passes($0) }.count
     }
 
     private func contentItems(_ category: ContentCategory) -> [PhotoItem] {
-        (result.categoryBuckets[category] ?? []).filter { !deletedIDs.contains($0.id) }
+        (result.categoryBuckets[category] ?? []).filter { !deletedIDs.contains($0.id) && passes($0) }
+    }
+
+    /// 大文件：优先 ≥10MB，按体积从大到小；都不够 10MB 时至少给出前 60 个
+    private var largeItems: [PhotoItem] {
+        let all = sortedBySize.filter { !deletedIDs.contains($0.id) && passes($0) }
+        let big = all.filter { $0.fileSize >= 10 * 1024 * 1024 }
+        return big.isEmpty ? Array(all.prefix(60)) : Array(big.prefix(400))
     }
 
     private var tabs: [ResultTab] {
         var list: [ResultTab] = [.suggested, .duplicate, .similar, .blurry]
+        if !largeItems.isEmpty {
+            list.append(.large)
+        }
         for category in ContentCategory.allCases where category != .other {
             let arr = contentItems(category)
             if !arr.isEmpty {
@@ -427,6 +533,7 @@ struct ResultView: View {
         case .duplicate: return dupGroups.reduce(0) { $0 + $1.items.count }
         case .similar: return simGroups.reduce(0) { $0 + $1.items.count }
         case .blurry: return blurry.count
+        case .large: return largeItems.count
         case .content(let c): return contentItems(c).count
         }
     }
@@ -437,41 +544,73 @@ struct ResultView: View {
         case .duplicate: return dupGroups.flatMap { $0.items }
         case .similar: return simGroups.flatMap { $0.items }
         case .blurry: return blurry
+        case .large: return largeItems
         case .content(let c): return contentItems(c)
         }
     }
 
-    private var allVisibleItems: [PhotoItem] {
-        var arr: [PhotoItem] = []
-        arr.append(contentsOf: suggested)
-        arr.append(contentsOf: dupGroups.flatMap { $0.items })
-        arr.append(contentsOf: simGroups.flatMap { $0.items })
-        arr.append(contentsOf: blurry)
-        arr.append(contentsOf: shots)
-        for category in ContentCategory.allCases {
-            arr.append(contentsOf: contentItems(category))
+    // MARK: 体积统计（空间看板用）
+
+    private var totalBytes: Int64 {
+        result.items.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
+    }
+
+    private var photoBytes: Int64 {
+        result.items.filter { !$0.isVideo }.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
+    }
+
+    private var videoBytes: Int64 {
+        result.items.filter { $0.isVideo }.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
+    }
+
+    private var suggestedBytes: Int64 {
+        suggested.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
+    }
+
+    private var duplicateWasteBytes: Int64 {
+        dupGroups.reduce(Int64(0)) { partial, group in
+            let total = group.items.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
+            let keep = group.items.first.map { max(0, $0.fileSize) } ?? 0
+            return partial + max(0, total - keep)
         }
-        return arr
+    }
+
+    private var freedBytes: Int64 {
+        deletedIDs.reduce(Int64(0)) { partial, id in
+            partial + max(0, itemIndex[id]?.fileSize ?? 0)
+        }
+    }
+
+    private var categoryRows: [CatRow] {
+        var bytes: [ContentCategory: Int64] = [:]
+        var counts: [ContentCategory: Int] = [:]
+        for item in result.items where !item.isVideo && !deletedIDs.contains(item.id) {
+            bytes[item.category, default: 0] += max(0, item.fileSize)
+            counts[item.category, default: 0] += 1
+        }
+        var rows: [CatRow] = bytes.map { key, value in
+            CatRow(id: key.rawValue, title: key.rawValue, bytes: value, count: counts[key] ?? 0)
+        }
+        rows.sort { $0.bytes > $1.bytes }
+        var out = Array(rows.prefix(6))
+        if videoBytes > 0 {
+            out.insert(CatRow(id: "video", title: "视频", bytes: videoBytes, count: result.videoCount), at: 0)
+        }
+        return out
     }
 
     // MARK: 顶部
 
     private var header: some View {
         VStack(spacing: 8) {
-            HStack {
+            HStack(spacing: 6) {
                 Text(summaryLine)
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
                 Spacer()
-                if selectedIDs.isEmpty {
-                    Text("点缩略图可放大")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                } else {
-                    Text("已选 \(selectedIDs.count) 张")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(.red)
-                }
+                headerButton(icon: "chart.pie.fill", text: "空间") { showDashboard = true }
+                headerButton(icon: "line.3.horizontal.decrease", text: "筛选") { showFilter = true }
+                headerButton(icon: "hand.draw.fill", text: "逐张过") { startTriage() }
             }
 
             HStack(spacing: 8) {
@@ -480,9 +619,81 @@ struct ResultView: View {
                 summaryItem(title: "发票", value: "\(receiptCount)", color: Color(red: 0.2, green: 0.55, blue: 0.4))
                 summaryItem(title: "截图", value: "\(shots.count)", color: Color(red: 0.4, green: 0.45, blue: 0.5))
             }
+
+            if !selectedIDs.isEmpty {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .font(.system(size: 11))
+                    Text("已选 \(selectedIDs.count) 张 · 切换分类不会丢")
+                        .font(.system(size: 11, weight: .medium))
+                    Spacer()
+                    Button {
+                        selectedIDs.removeAll()
+                    } label: {
+                        Text("清空")
+                            .font(.system(size: 11, weight: .medium))
+                    }
+                }
+                .foregroundColor(.red)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Capsule().fill(Color.red.opacity(0.08)))
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
+    }
+
+    private func headerButton(icon: String, text: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 3) {
+                Image(systemName: icon)
+                    .font(.system(size: 10))
+                Text(text)
+                    .font(.system(size: 11, weight: .medium))
+            }
+            .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(Color.white))
+        }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private var filterBar: some View {
+        if period != .all || albumChoice != nil {
+            HStack(spacing: 6) {
+                Image(systemName: "line.3.horizontal.decrease.circle.fill")
+                    .font(.system(size: 11))
+                Text(filterSummary)
+                    .font(.system(size: 11, weight: .medium))
+                Spacer()
+                Button {
+                    period = .all
+                    albumChoice = nil
+                    albumIDs = nil
+                } label: {
+                    Text("清除筛选")
+                        .font(.system(size: 11, weight: .medium))
+                }
+            }
+            .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Capsule().fill(Color(red: 0.18, green: 0.49, blue: 0.96).opacity(0.1)))
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+        }
+    }
+
+    private var filterSummary: String {
+        let albumName = albumChoice?.title ?? "全部相册"
+        return period.rawValue + " · " + albumName
+    }
+
+    private var largeTotalBytes: Int64 {
+        largeItems.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
     }
 
     private var summaryLine: String {
@@ -572,9 +783,108 @@ struct ResultView: View {
         case .blurry:
             flatList(blurry, tag: "模糊", emptyText: "没有发现模糊照片")
 
+        case .large:
+            largeList
+
         case .content(let category):
             flatList(contentItems(category), tag: category.rawValue, emptyText: "这一类没有照片")
         }
+    }
+
+    @ViewBuilder
+    private var largeList: some View {
+        if largeItems.isEmpty {
+            emptyHint("没有找到大文件", icon: "checkmark.circle")
+        } else {
+            HStack {
+                Text("按体积从大到小 · 共 " + byteText(largeTotalBytes))
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button {
+                    selectedIDs.formUnion(largeItems.map { $0.id })
+                } label: {
+                    Text("全选本类 \(largeItems.count) 项")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
+                }
+            }
+            .padding(.vertical, 2)
+
+            ForEach(largeItems) { item in
+                largeRow(item)
+            }
+        }
+    }
+
+    private func largeRow(_ item: PhotoItem) -> some View {
+        HStack(spacing: 12) {
+            SelectableThumb(
+                item: item,
+                isSelected: selectedIDs.contains(item.id),
+                size: 66,
+                onOpen: { open(item, in: largeItems) },
+                onToggle: { toggle(item.id) }
+            )
+
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 6) {
+                    Text(byteText(item.fileSize))
+                        .font(.system(size: 16, weight: .semibold))
+                    if item.isVideo {
+                        Text("视频")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color(red: 0.3, green: 0.45, blue: 0.85)))
+                    }
+                }
+                Text(item.displayName)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Text(subLine(item))
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+            }
+
+            Spacer()
+
+            if item.isVideo {
+                Button {
+                    confirmCompress = item
+                } label: {
+                    Text("压到 720p")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 7)
+                        .background(Capsule().fill(Color(red: 0.18, green: 0.49, blue: 0.96).opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+                .disabled(compressingID != nil)
+            }
+        }
+        .padding(10)
+        .background(Color.white)
+        .cornerRadius(12)
+    }
+
+    private func subLine(_ item: PhotoItem) -> String {
+        if item.isVideo {
+            let d = durationText(item)
+            return d.isEmpty ? item.resolutionText : item.resolutionText + " · " + d
+        }
+        return item.sizeText.isEmpty ? item.resolutionText : item.resolutionText + " · " + item.sizeText
+    }
+
+    private func durationText(_ item: PhotoItem) -> String {
+        let d = Int(item.asset.duration.rounded())
+        if d <= 0 { return "" }
+        if d >= 3600 {
+            return String(format: "%d:%02d:%02d", d / 3600, (d % 3600) / 60, d % 60)
+        }
+        return String(format: "%d:%02d", d / 60, d % 60)
     }
 
     @ViewBuilder
@@ -848,12 +1158,12 @@ struct ResultView: View {
         showPreview = true
     }
 
-    /// 一步删除：点一下直接调系统删除，只剩 iOS 自己那一次确认
+    /// 一步删除：点一下直接调系统删除，只剩 iOS 自己那一次确认。
+    /// 选中的照片可以来自不同分类 / 不同筛选，统一按 id 还原成真实对象再删。
     private func performDelete() {
-        var seen = Set<String>()
         var chosen: [PhotoItem] = []
-        for item in allVisibleItems where selectedIDs.contains(item.id) {
-            if seen.insert(item.id).inserted {
+        for id in selectedIDs {
+            if let item = itemIndex[id] {
                 chosen.append(item)
             }
         }
@@ -882,6 +1192,91 @@ struct ResultView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
             if toast == text {
                 toast = nil
+            }
+        }
+    }
+
+    // MARK: 附加功能
+
+    private func startTriage() {
+        let list = currentList()
+        guard !list.isEmpty else {
+            showToast("「\(tab.title)」里没有照片")
+            return
+        }
+        showTriage = true
+    }
+
+    private func loadAlbums() {
+        guard albumOptions.isEmpty else { return }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let list = PhotoLibraryService.shared.fetchUserAlbums()
+            let options = list.map { AlbumOption(id: $0.id, title: $0.title, count: $0.count) }
+            DispatchQueue.main.async {
+                albumOptions = options
+            }
+        }
+    }
+
+    private func reloadAlbumIDs(_ choice: AlbumOption?) {
+        guard let choice = choice else {
+            albumIDs = nil
+            return
+        }
+        DispatchQueue.global(qos: .userInitiated).async {
+            let ids = PhotoLibraryService.shared.assetIDs(inAlbum: choice.id)
+            DispatchQueue.main.async {
+                albumIDs = ids
+            }
+        }
+    }
+
+    private func startCompress(_ item: PhotoItem) {
+        compressingID = item.id
+        VideoCompressor.shared.compress(asset: item.asset) { result in
+            compressingID = nil
+            switch result {
+            case .success(let sizes):
+                let old = sizes.0
+                let new = sizes.1
+                if old <= 0 {
+                    if new > 0 {
+                        deletedIDs.insert(item.id)
+                        selectedIDs.remove(item.id)
+                        showToast("已压缩到 \(byteText(new))")
+                    }
+                } else if new <= 0 || new >= Int64(Double(old) * 0.97) {
+                    showToast("这段已经很省空间了，压缩不划算，已保留原片")
+                } else {
+                    deletedIDs.insert(item.id)
+                    selectedIDs.remove(item.id)
+                    let saved = Int(Double(old - new) / Double(old) * 100)
+                    showToast("已压缩 \(byteText(old)) → \(byteText(new))，省 \(saved)%")
+                }
+            case .failure(let error):
+                message = "压缩失败：" + error.localizedDescription
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var compressingOverlay: some View {
+        if compressingID != nil {
+            ZStack {
+                Color.black.opacity(0.35).ignoresSafeArea()
+                VStack(spacing: 10) {
+                    ProgressView()
+                        .progressViewStyle(.circular)
+                        .tint(.white)
+                    Text("正在压缩视频…")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(.white)
+                    Text("大视频要几分钟，别锁屏、别切走")
+                        .font(.system(size: 11))
+                        .foregroundColor(.white.opacity(0.7))
+                }
+                .padding(26)
+                .background(RoundedRectangle(cornerRadius: 16).fill(Color.black.opacity(0.78)))
             }
         }
     }

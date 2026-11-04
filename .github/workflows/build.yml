@@ -1,5 +1,11 @@
 name: Build iOS IPA
 
+# 同一个分支只保留最新一次构建：新提交会取消还在排队的旧构建，
+# 免得旧的占着机器、新的排半小时。
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   push:
     branches: [ main, master ]

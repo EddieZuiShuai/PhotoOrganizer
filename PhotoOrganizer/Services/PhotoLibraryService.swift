@@ -153,6 +153,40 @@ final class PhotoLibraryService {
         return 0
     }
 
+    // MARK: - 相册列表（筛选用）
+
+    /// 用户自建相册（只返回里面有内容的）
+    func fetchUserAlbums() -> [(id: String, title: String, count: Int)] {
+        var out: [(id: String, title: String, count: Int)] = []
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "localizedTitle", ascending: true)]
+
+        let result = PHAssetCollection.fetchAssetCollections(with: .album, subtype: .any, options: options)
+        result.enumerateObjects { collection, _, _ in
+            let assets = PHAsset.fetchAssets(in: collection, options: nil)
+            if assets.count > 0 {
+                out.append((collection.localIdentifier,
+                            collection.localizedTitle ?? "未命名相册",
+                            assets.count))
+            }
+        }
+        return out
+    }
+
+    /// 某个相册里的全部资产 id（只读 id，很快）
+    func assetIDs(inAlbum id: String) -> Set<String> {
+        let fetched = PHAssetCollection.fetchAssetCollections(withLocalIdentifiers: [id], options: nil)
+        guard let collection = fetched.firstObject else { return [] }
+
+        let assets = PHAsset.fetchAssets(in: collection, options: nil)
+        var ids = Set<String>()
+        ids.reserveCapacity(assets.count)
+        assets.enumerateObjects { asset, _, _ in
+            ids.insert(asset.localIdentifier)
+        }
+        return ids
+    }
+
     // MARK: - 删除
 
     /// 删除照片。系统会再弹一次确认，删除后进入「最近删除」，30 天内可恢复。

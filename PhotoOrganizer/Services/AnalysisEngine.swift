@@ -53,9 +53,9 @@ final class AnalysisEngine {
                     isVideo: isVideo
                 )
                 item.isFavorite = asset.isFavorite
+                item.fileSize = library.fileSize(of: asset)
 
                 if !isVideo {
-                    item.fileSize = library.fileSize(of: asset)
                     if let thumb = library.thumbnail(for: asset, maxPixel: 256) {
                         item.dHash = self.dHash(from: thumb)
                         item.sharpness = self.sharpness(from: thumb)

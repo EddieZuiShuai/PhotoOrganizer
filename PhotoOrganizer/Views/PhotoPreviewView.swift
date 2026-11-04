@@ -131,20 +131,32 @@ struct ZoomableImageView: View {
     }
 }
 
-// MARK: - 全屏浏览（左右滑动 + 双指放大 + 双击放大 + 删除）
+// MARK: - 全屏浏览（左右滑 + 双指放大 + 双击放大 + 标记/删除）
 
 struct PhotoPreviewView: View {
     let items: [PhotoItem]
+    @Binding var selectedIDs: Set<String>
     let onDelete: (PhotoItem) -> Void
 
     @State private var index: Int
 
     @Environment(\.dismiss) private var dismiss
 
-    init(items: [PhotoItem], startIndex: Int, onDelete: @escaping (PhotoItem) -> Void) {
+    init(items: [PhotoItem], startIndex: Int, selectedIDs: Binding<Set<String>>, onDelete: @escaping (PhotoItem) -> Void) {
         self.items = items
+        self._selectedIDs = selectedIDs
         self._index = State(initialValue: max(0, min(startIndex, max(0, items.count - 1))))
         self.onDelete = onDelete
+    }
+
+    private var current: PhotoItem? {
+        guard index >= 0, index < items.count else { return nil }
+        return items[index]
+    }
+
+    private var marked: Bool {
+        guard let item = current else { return false }
+        return selectedIDs.contains(item.id)
     }
 
     var body: some View {
@@ -169,6 +181,7 @@ struct PhotoPreviewView: View {
                 topBar
                 Spacer()
                 bottomInfo
+                actionBar
             }
         }
         .statusBarHidden(true)
@@ -179,7 +192,7 @@ struct PhotoPreviewView: View {
             Button {
                 dismiss()
             } label: {
-                Image(systemName: "xmark")
+                Image(systemName: "chevron.down")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(.white)
                     .frame(width: 38, height: 38)
@@ -199,21 +212,11 @@ struct PhotoPreviewView: View {
 
             Spacer()
 
-            // 一步删除：点一下直接交给系统，不再问第二遍
-            Button {
-                guard index >= 0, index < items.count else { return }
-                let item = items[index]
-                dismiss()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                    onDelete(item)
-                }
-            } label: {
-                Image(systemName: "trash")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.white)
-                    .frame(width: 38, height: 38)
-                    .background(Circle().fill(Color.red.opacity(0.8)))
-            }
+            // 已标记的数量，回列表后一起删
+            Text(selectedIDs.isEmpty ? "—" : "已选 \(selectedIDs.count)")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(selectedIDs.isEmpty ? .white.opacity(0.5) : Color(red: 1, green: 0.55, blue: 0.5))
+                .frame(width: 58, height: 38)
         }
         .padding(.horizontal, 16)
         .padding(.top, 12)
@@ -221,8 +224,7 @@ struct PhotoPreviewView: View {
 
     @ViewBuilder
     private var bottomInfo: some View {
-        if index >= 0, index < items.count {
-            let item = items[index]
+        if let item = current {
             VStack(spacing: 3) {
                 Text(item.displayName)
                     .font(.system(size: 13, weight: .medium))
@@ -235,9 +237,89 @@ struct PhotoPreviewView: View {
                 }
                 .font(.system(size: 11))
                 .foregroundColor(.white.opacity(0.6))
+
+                if marked {
+                    Text("已标记待删")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Capsule().fill(Color.red.opacity(0.85)))
+                        .padding(.top, 4)
+                }
             }
             .foregroundColor(.white)
-            .padding(.bottom, 28)
+            .padding(.bottom, 14)
+        }
+    }
+
+    private var actionBar: some View {
+        HStack(spacing: 12) {
+            // 在预览里就能勾选，不用退回列表
+            Button {
+                toggleMark()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: marked ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 15))
+                    Text(marked ? "取消标记" : "标记待删")
+                        .font(.system(size: 14, weight: .medium))
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(
+                    RoundedRectangle(cornerRadius: 11)
+                        .fill(marked ? Color.white.opacity(0.28) : Color.white.opacity(0.14))
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(current == nil)
+
+            Button {
+                deleteNow()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "trash")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("立即删除")
+                        .font(.system(size: 14, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 13)
+                .background(
+                    RoundedRectangle(cornerRadius: 11)
+                        .fill(Color.red.opacity(0.9))
+                )
+            }
+            .buttonStyle(.plain)
+            .disabled(current == nil)
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 26)
+        .padding(.top, 4)
+    }
+
+    // MARK: 行为
+
+    private func toggleMark() {
+        guard let item = current else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        if selectedIDs.contains(item.id) {
+            selectedIDs.remove(item.id)
+        } else {
+            selectedIDs.insert(item.id)
+        }
+    }
+
+    /// 一步删除：点一下交给系统，只剩 iOS 自己那一次确认
+    private func deleteNow() {
+        guard let item = current else { return }
+        selectedIDs.remove(item.id)
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            onDelete(item)
         }
     }
 }
