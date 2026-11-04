@@ -14,6 +14,7 @@
 		1A0000000000000000000035 /* ContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000025 /* ContentView.swift */; };
 		1A0000000000000000000036 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000027 /* Assets.xcassets */; };
 		1A0000000000000000000037 /* PhotoPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000028 /* PhotoPreviewView.swift */; };
+		1A0000000000000000000038 /* ContentAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000029 /* ContentAnalyzer.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -26,6 +27,7 @@
 		1A0000000000000000000026 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		1A0000000000000000000027 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		1A0000000000000000000028 /* PhotoPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoPreviewView.swift; sourceTree = "<group>"; };
+		1A0000000000000000000029 /* ContentAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentAnalyzer.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -73,6 +75,7 @@
 			children = (
 				1A0000000000000000000023 /* PhotoLibraryService.swift */,
 				1A0000000000000000000024 /* AnalysisEngine.swift */,
+				1A0000000000000000000029 /* ContentAnalyzer.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -170,6 +173,7 @@
 				1A0000000000000000000034 /* AnalysisEngine.swift in Sources */,
 				1A0000000000000000000035 /* ContentView.swift in Sources */,
 				1A0000000000000000000037 /* PhotoPreviewView.swift in Sources */,
+				1A0000000000000000000038 /* ContentAnalyzer.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -268,7 +272,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = PhotoOrganizer/Info.plist;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
@@ -291,7 +295,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 3;
 				GENERATE_INFOPLIST_FILE = NO;
 				INFOPLIST_FILE = PhotoOrganizer/Info.plist;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;

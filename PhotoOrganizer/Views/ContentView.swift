@@ -99,6 +99,46 @@ struct ContentView: View {
     }
 }
 
+// MARK: - 结果页标签
+
+enum ResultTab: Hashable, Identifiable {
+    case suggested
+    case duplicate
+    case similar
+    case blurry
+    case content(ContentCategory)
+
+    var id: String {
+        switch self {
+        case .suggested: return "suggested"
+        case .duplicate: return "duplicate"
+        case .similar: return "similar"
+        case .blurry: return "blurry"
+        case .content(let c): return "c-" + c.rawValue
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .suggested: return "建议清理"
+        case .duplicate: return "重复"
+        case .similar: return "相似"
+        case .blurry: return "模糊"
+        case .content(let c): return c.rawValue
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .suggested: return "sparkles"
+        case .duplicate: return "doc.on.doc"
+        case .similar: return "square.stack.3d.up"
+        case .blurry: return "camera.filters"
+        case .content(let c): return c.icon
+        }
+    }
+}
+
 // MARK: - 首页
 
 struct HomeView: View {
@@ -132,13 +172,17 @@ struct HomeView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 14) {
+                    featureRow(icon: "sparkles", title: "智能建议", desc: "综合判断哪些照片你可能想删，并说明理由")
+                    Divider()
                     featureRow(icon: "doc.on.doc", title: "重复照片", desc: "原图文件完全相同，留一张就够")
                     Divider()
                     featureRow(icon: "square.stack.3d.up", title: "相似照片", desc: "连拍、角度几乎一样的那些")
                     Divider()
                     featureRow(icon: "camera.filters", title: "模糊照片", desc: "糊掉、拍废了的")
                     Divider()
-                    featureRow(icon: "rectangle.dashed", title: "截图", desc: "系统截图，通常不需要留太久")
+                    featureRow(icon: "doc.text.fill", title: "发票票据", desc: "自动认出发票、收据、小票，可按类整批处理")
+                    Divider()
+                    featureRow(icon: "person.fill", title: "内容分类", desc: "人物 / 美食 / 风景 / 宠物 / 截图 自动归类")
                 }
                 .padding(18)
                 .background(Color.white)
@@ -163,7 +207,7 @@ struct HomeView: View {
                         .cornerRadius(12)
                 }
 
-                Text("扫描不改动任何照片。删除前会二次确认，删掉的照片可在「最近删除」里 30 天内恢复。")
+                Text("扫描不改动任何照片。删除一步生效，删掉的照片可在「最近删除」里 30 天内恢复。")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -267,7 +311,7 @@ struct ScanningView: View {
                 .font(.system(size: 13))
                 .foregroundColor(.secondary)
 
-            Text("照片多的话需要几分钟，别锁屏、别切走")
+            Text("这次多了一步「内容识别」，照片多的话会比之前慢一些\n别锁屏、别切走")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -284,7 +328,7 @@ struct ResultView: View {
     let result: AnalysisResult
     let onRestart: () -> Void
 
-    @State private var selectedCategory: PhotoCategory = .duplicate
+    @State private var tab: ResultTab = .suggested
     @State private var selectedIDs: Set<String> = []
     @State private var deletedIDs: Set<String> = []
 
@@ -292,49 +336,29 @@ struct ResultView: View {
     @State private var previewStart: Int = 0
     @State private var showPreview = false
 
-    @State private var showDeleteConfirm = false
     @State private var message: String?
+    @State private var toast: String?
 
     var body: some View {
         VStack(spacing: 0) {
             header
-
-            Picker("分类", selection: $selectedCategory) {
-                ForEach(PhotoCategory.allCases) { cat in
-                    Text("\(cat.rawValue) \(count(for: cat))").tag(cat)
-                }
-            }
-            .pickerStyle(.segmented)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
+            chips
 
             ScrollView {
                 LazyVStack(spacing: 10) {
                     content
                 }
                 .padding(.horizontal, 16)
-                .padding(.bottom, 110)
+                .padding(.bottom, 130)
             }
         }
         .overlay(alignment: .bottom) {
-            bottomBar
+            bottomArea
         }
-        .onChange(of: selectedCategory) { _ in
+        .onChange(of: tab) { _ in
             selectedIDs.removeAll()
         }
-        .confirmationDialog(
-            "删除选中的 \(selectedIDs.count) 张照片？",
-            isPresented: $showDeleteConfirm,
-            titleVisibility: .visible
-        ) {
-            Button("删除 \(selectedIDs.count) 张", role: .destructive) {
-                performDelete()
-            }
-            Button("取消", role: .cancel) { }
-        } message: {
-            Text("删除后会进入「照片」App 的「最近删除」，30 天内可以恢复。")
-        }
-        .alert("提示", isPresented: Binding(
+        .alert("出错了", isPresented: Binding(
             get: { message != nil },
             set: { if !$0 { message = nil } }
         )) {
@@ -347,9 +371,10 @@ struct ResultView: View {
                 deleteItems([item])
             }
         }
+        .animation(.easeInOut(duration: 0.2), value: toast)
     }
 
-    // MARK: 过滤后的数据
+    // MARK: 数据
 
     private func alive(_ group: PhotoGroup) -> PhotoGroup? {
         let items = group.items.filter { !deletedIDs.contains($0.id) }
@@ -365,6 +390,10 @@ struct ResultView: View {
         result.similarGroups.compactMap { alive($0) }
     }
 
+    private var suggested: [PhotoItem] {
+        result.suggestedItems.filter { !deletedIDs.contains($0.id) }
+    }
+
     private var blurry: [PhotoItem] {
         result.blurryItems.filter { !deletedIDs.contains($0.id) }
     }
@@ -373,12 +402,55 @@ struct ResultView: View {
         result.screenshotItems.filter { !deletedIDs.contains($0.id) }
     }
 
+    private var receiptCount: Int {
+        (result.categoryBuckets[.receipt] ?? []).filter { !deletedIDs.contains($0.id) }.count
+    }
+
+    private func contentItems(_ category: ContentCategory) -> [PhotoItem] {
+        (result.categoryBuckets[category] ?? []).filter { !deletedIDs.contains($0.id) }
+    }
+
+    private var tabs: [ResultTab] {
+        var list: [ResultTab] = [.suggested, .duplicate, .similar, .blurry]
+        for category in ContentCategory.allCases where category != .other {
+            let arr = contentItems(category)
+            if !arr.isEmpty {
+                list.append(.content(category))
+            }
+        }
+        return list
+    }
+
+    private func count(for target: ResultTab) -> Int {
+        switch target {
+        case .suggested: return suggested.count
+        case .duplicate: return dupGroups.reduce(0) { $0 + $1.items.count }
+        case .similar: return simGroups.reduce(0) { $0 + $1.items.count }
+        case .blurry: return blurry.count
+        case .content(let c): return contentItems(c).count
+        }
+    }
+
+    private func currentList() -> [PhotoItem] {
+        switch tab {
+        case .suggested: return suggested
+        case .duplicate: return dupGroups.flatMap { $0.items }
+        case .similar: return simGroups.flatMap { $0.items }
+        case .blurry: return blurry
+        case .content(let c): return contentItems(c)
+        }
+    }
+
     private var allVisibleItems: [PhotoItem] {
         var arr: [PhotoItem] = []
+        arr.append(contentsOf: suggested)
         arr.append(contentsOf: dupGroups.flatMap { $0.items })
         arr.append(contentsOf: simGroups.flatMap { $0.items })
         arr.append(contentsOf: blurry)
         arr.append(contentsOf: shots)
+        for category in ContentCategory.allCases {
+            arr.append(contentsOf: contentItems(category))
+        }
         return arr
     }
 
@@ -402,10 +474,10 @@ struct ResultView: View {
                 }
             }
 
-            HStack(spacing: 10) {
-                summaryItem(title: "重复组", value: "\(dupGroups.count)", color: Color(red: 0.85, green: 0.35, blue: 0.2))
-                summaryItem(title: "相似组", value: "\(simGroups.count)", color: Color(red: 0.55, green: 0.35, blue: 0.85))
-                summaryItem(title: "模糊", value: "\(blurry.count)", color: Color(red: 0.85, green: 0.6, blue: 0.1))
+            HStack(spacing: 8) {
+                summaryItem(title: "建议清理", value: "\(suggested.count)", color: Color(red: 0.85, green: 0.25, blue: 0.2))
+                summaryItem(title: "重复组", value: "\(dupGroups.count)", color: Color(red: 0.85, green: 0.45, blue: 0.15))
+                summaryItem(title: "发票", value: "\(receiptCount)", color: Color(red: 0.2, green: 0.55, blue: 0.4))
                 summaryItem(title: "截图", value: "\(shots.count)", color: Color(red: 0.4, green: 0.45, blue: 0.5))
             }
         }
@@ -439,49 +511,101 @@ struct ResultView: View {
         .cornerRadius(10)
     }
 
-    // MARK: 列表内容
+    private var chips: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                ForEach(tabs) { item in
+                    Button {
+                        tab = item
+                    } label: {
+                        HStack(spacing: 4) {
+                            Image(systemName: item.icon)
+                                .font(.system(size: 11))
+                            Text("\(item.title) \(count(for: item))")
+                                .font(.system(size: 13, weight: .medium))
+                        }
+                        .foregroundColor(tab == item ? .white : .primary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 7)
+                        .background(
+                            Capsule().fill(
+                                tab == item
+                                ? Color(red: 0.18, green: 0.49, blue: 0.96)
+                                : Color.white
+                            )
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 8)
+        }
+    }
+
+    // MARK: 列表
 
     @ViewBuilder
     private var content: some View {
-        switch selectedCategory {
+        switch tab {
         case .duplicate:
             if dupGroups.isEmpty {
-                emptyHint("没有发现完全相同的照片")
+                emptyHint("没有发现完全相同的照片", icon: "checkmark.circle")
             } else {
                 ForEach(Array(dupGroups.enumerated()), id: \.element.id) { index, group in
                     groupCard(group: group, index: index + 1)
                 }
             }
+
         case .similar:
             if simGroups.isEmpty {
-                emptyHint("没有发现相似照片")
+                emptyHint("没有发现相似照片", icon: "checkmark.circle")
             } else {
                 ForEach(Array(simGroups.enumerated()), id: \.element.id) { index, group in
                     groupCard(group: group, index: index + 1)
                 }
             }
+
+        case .suggested:
+            flatList(suggested, tag: nil, emptyText: "没有需要特别提醒的照片")
+
         case .blurry:
-            if blurry.isEmpty {
-                emptyHint("没有发现模糊照片")
-            } else {
-                ForEach(blurry) { item in
-                    singleCard(item: item, tag: "模糊", onOpen: { open(item, in: blurry) })
+            flatList(blurry, tag: "模糊", emptyText: "没有发现模糊照片")
+
+        case .content(let category):
+            flatList(contentItems(category), tag: category.rawValue, emptyText: "这一类没有照片")
+        }
+    }
+
+    @ViewBuilder
+    private func flatList(_ list: [PhotoItem], tag: String?, emptyText: String) -> some View {
+        if list.isEmpty {
+            emptyHint(emptyText, icon: "checkmark.circle")
+        } else {
+            HStack {
+                Text(tag == nil ? "按可能性从高到低排序" : "共 \(list.count) 张")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button {
+                    selectedIDs.formUnion(list.map { $0.id })
+                } label: {
+                    Text("全选本类 \(list.count) 张")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
                 }
             }
-        case .screenshot:
-            if shots.isEmpty {
-                emptyHint("没有发现截图")
-            } else {
-                ForEach(shots) { item in
-                    singleCard(item: item, tag: "截图", onOpen: { open(item, in: shots) })
-                }
+            .padding(.vertical, 2)
+
+            ForEach(list) { item in
+                itemRow(item, tag: tag)
             }
         }
     }
 
-    private func emptyHint(_ text: String) -> some View {
+    private func emptyHint(_ text: String, icon: String) -> some View {
         VStack(spacing: 8) {
-            Image(systemName: "checkmark.circle")
+            Image(systemName: icon)
                 .font(.system(size: 28))
                 .foregroundColor(.green)
             Text(text)
@@ -547,51 +671,106 @@ struct ResultView: View {
         .cornerRadius(12)
     }
 
-    private func singleCard(item: PhotoItem, tag: String, onOpen: @escaping () -> Void) -> some View {
+    private func itemRow(_ item: PhotoItem, tag: String?) -> some View {
         HStack(spacing: 12) {
             SelectableThumb(
                 item: item,
                 isSelected: selectedIDs.contains(item.id),
                 size: 66,
-                onOpen: onOpen,
+                onOpen: { open(item, in: currentList()) },
                 onToggle: { toggle(item.id) }
             )
 
             VStack(alignment: .leading, spacing: 4) {
-                Text(item.displayName)
-                    .font(.system(size: 14, weight: .medium))
                 HStack(spacing: 6) {
-                    Text(item.resolutionText)
-                    if !item.sizeText.isEmpty {
-                        Text("·")
-                        Text(item.sizeText)
+                    Text(item.displayName)
+                        .font(.system(size: 14, weight: .medium))
+
+                    if item.cleanupScore >= 0.5 {
+                        Text("\(item.scorePercent)%")
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(scoreColor(item.cleanupScore)))
                     }
                 }
-                .font(.system(size: 12))
-                .foregroundColor(.secondary)
-                if let s = item.sharpness {
-                    Text(String(format: "清晰度 %.1f", s))
+
+                if !item.cleanupReasons.isEmpty {
+                    Text(item.cleanupReasons.prefix(2).joined(separator: " · "))
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
+                        .lineLimit(2)
+                } else {
+                    HStack(spacing: 6) {
+                        Text(item.resolutionText)
+                        if !item.sizeText.isEmpty {
+                            Text("·")
+                            Text(item.sizeText)
+                        }
+                    }
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                }
+
+                let detail = tagText(item)
+                if !detail.isEmpty {
+                    Text(detail)
+                        .font(.system(size: 10))
+                        .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
+                        .lineLimit(1)
                 }
             }
 
             Spacer()
 
-            Text(tag)
-                .font(.system(size: 11))
-                .foregroundColor(.white)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(tag == "模糊" ? Color.orange : Color.gray)
-                .cornerRadius(6)
+            if let tag = tag {
+                Text(tag)
+                    .font(.system(size: 11))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 4)
+                    .background(tag == "模糊" ? Color.orange : Color.gray)
+                    .cornerRadius(6)
+            }
         }
-        .padding(12)
+        .padding(10)
         .background(Color.white)
         .cornerRadius(12)
     }
 
+    private func tagText(_ item: PhotoItem) -> String {
+        if !item.ocrHits.isEmpty {
+            return "识别到：" + item.ocrHits.prefix(3).joined(separator: " / ")
+        }
+        if !item.contentTags.isEmpty {
+            return item.contentTags.joined(separator: " · ")
+        }
+        return ""
+    }
+
+    private func scoreColor(_ score: Double) -> Color {
+        if score >= 0.85 { return Color(red: 0.85, green: 0.25, blue: 0.2) }
+        if score >= 0.65 { return Color(red: 0.9, green: 0.5, blue: 0.1) }
+        return Color(red: 0.55, green: 0.55, blue: 0.6)
+    }
+
     // MARK: 底部操作栏
+
+    private var bottomArea: some View {
+        VStack(spacing: 0) {
+            if let toast = toast {
+                Text(toast)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(Capsule().fill(Color.black.opacity(0.78)))
+                    .padding(.bottom, 10)
+            }
+            bottomBar
+        }
+    }
 
     private var bottomBar: some View {
         VStack(spacing: 0) {
@@ -635,7 +814,7 @@ struct ResultView: View {
                     }
 
                     Button {
-                        showDeleteConfirm = true
+                        performDelete()
                     } label: {
                         Text("删除 \(selectedIDs.count) 张")
                             .font(.system(size: 15, weight: .semibold))
@@ -669,20 +848,28 @@ struct ResultView: View {
         showPreview = true
     }
 
+    /// 一步删除：点一下直接调系统删除，只剩 iOS 自己那一次确认
     private func performDelete() {
-        let items = allVisibleItems.filter { selectedIDs.contains($0.id) }
-        guard !items.isEmpty else { return }
-        deleteItems(items)
+        var seen = Set<String>()
+        var chosen: [PhotoItem] = []
+        for item in allVisibleItems where selectedIDs.contains(item.id) {
+            if seen.insert(item.id).inserted {
+                chosen.append(item)
+            }
+        }
+        guard !chosen.isEmpty else { return }
+        deleteItems(chosen)
     }
 
     private func deleteItems(_ items: [PhotoItem]) {
+        guard !items.isEmpty else { return }
         let assets = items.map { $0.asset }
         PhotoLibraryService.shared.delete(assets: assets) { success, error in
             DispatchQueue.main.async {
                 if success {
                     deletedIDs.formUnion(items.map { $0.id })
                     selectedIDs.subtract(Set(items.map { $0.id }))
-                    message = "已删除 \(items.count) 张照片，可在「照片 → 最近删除」里恢复。"
+                    showToast("已删除 \(items.count) 张 · 30 天内在「最近删除」可恢复")
                 } else {
                     message = "删除失败：" + (error?.localizedDescription ?? "未知原因")
                 }
@@ -690,12 +877,12 @@ struct ResultView: View {
         }
     }
 
-    private func count(for cat: PhotoCategory) -> Int {
-        switch cat {
-        case .duplicate: return dupGroups.count
-        case .similar: return simGroups.count
-        case .blurry: return blurry.count
-        case .screenshot: return shots.count
+    private func showToast(_ text: String) {
+        toast = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+            if toast == text {
+                toast = nil
+            }
         }
     }
 
@@ -705,11 +892,28 @@ struct ResultView: View {
         lines.append("生成时间：" + DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .short))
         lines.append("")
         lines.append("照片总数：\(result.photoCount)")
+        lines.append("建议清理：\(suggested.count)")
         lines.append("重复组：\(dupGroups.count)")
         lines.append("相似组：\(simGroups.count)")
         lines.append("模糊：\(blurry.count)")
         lines.append("截图：\(shots.count)")
+
+        for category in ContentCategory.allCases where category != .other {
+            let n = contentItems(category).count
+            if n > 0 {
+                lines.append("\(category.rawValue)：\(n)")
+            }
+        }
         lines.append("")
+
+        if !suggested.isEmpty {
+            lines.append("—— 建议清理（按可能性排序）——")
+            for item in suggested {
+                let reason = item.cleanupReasons.prefix(2).joined(separator: "；")
+                lines.append("  · \(item.displayName)  \(item.scorePercent)%  \(reason)")
+            }
+            lines.append("")
+        }
 
         if !dupGroups.isEmpty {
             lines.append("—— 重复组（原图文件完全相同）——")
@@ -733,19 +937,14 @@ struct ResultView: View {
             lines.append("")
         }
 
-        if !blurry.isEmpty {
-            lines.append("—— 模糊照片 ——")
-            for item in blurry {
-                lines.append("  · \(item.displayName)  \(item.resolutionText)")
+        let receipts = contentItems(.receipt)
+        if !receipts.isEmpty {
+            lines.append("—— 发票票据 ——")
+            for item in receipts {
+                let hit = item.ocrHits.prefix(3).joined(separator: "/")
+                lines.append("  · \(item.displayName)  \(hit)")
             }
             lines.append("")
-        }
-
-        if !shots.isEmpty {
-            lines.append("—— 截图 ——")
-            for item in shots {
-                lines.append("  · \(item.displayName)  \(item.resolutionText)")
-            }
         }
 
         return lines.joined(separator: "\n")

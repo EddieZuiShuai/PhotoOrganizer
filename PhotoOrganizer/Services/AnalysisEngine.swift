@@ -36,7 +36,10 @@ final class AnalysisEngine {
             var items: [PhotoItem] = []
             items.reserveCapacity(total)
 
-            // 1) 逐张提取特征
+            // 照片特别多时（>2 万张）跳过 OCR，否则扫一次要太久
+            let doContent = total <= 20000
+
+            // 1) 逐张提取特征 + 内容识别（一次缩略图，算四样东西）
             for (index, asset) in assets.enumerated() {
                 let isVideo = (asset.mediaType == .video)
 
@@ -49,24 +52,37 @@ final class AnalysisEngine {
                     isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
                     isVideo: isVideo
                 )
+                item.isFavorite = asset.isFavorite
 
                 if !isVideo {
                     item.fileSize = library.fileSize(of: asset)
                     if let thumb = library.thumbnail(for: asset, maxPixel: 256) {
                         item.dHash = self.dHash(from: thumb)
                         item.sharpness = self.sharpness(from: thumb)
+
+                        let st = ContentAnalyzer.shared.stats(from: thumb)
+                        item.brightness = st.brightness
+                        item.edgeDensity = st.edgeDensity
+
+                        if doContent {
+                            let content = ContentAnalyzer.shared.analyze(
+                                image: thumb,
+                                isScreenshot: item.isScreenshot
+                            )
+                            item.category = content.category
+                            item.contentTags = content.tags
+                            item.ocrHits = content.ocrHits
+                            item.faceCount = content.faceCount
+                        }
                     }
                 }
 
                 items.append(item)
 
-                if index % 20 == 0 || index == total - 1 {
-                    progress(index + 1, total, "正在读取照片")
+                if index % 10 == 0 || index == total - 1 {
+                    progress(index + 1, total, "正在识别照片内容")
                 }
             }
-
-            result.items = items
-            result.videoCount = items.filter { $0.isVideo }.count
 
             // 2) 完全重复（读原图字节核对）
             progress(total, total, "正在核对完全重复（读取原图，稍慢）")
@@ -77,8 +93,29 @@ final class AnalysisEngine {
             progress(total, total, "正在比对相似照片")
             result.similarGroups = self.findSimilarGroups(items: items, excluding: exact.memberIDs)
 
-            // 4) 模糊 / 截图
-            progress(total, total, "正在挑出模糊与截图")
+            // 4) 打分：给出「建议清理」及其原因
+            progress(total, total, "正在生成清理建议")
+            let scores = self.buildScores(
+                items: items,
+                duplicates: result.duplicateGroups,
+                similar: result.similarGroups,
+                blur: self.blurThreshold
+            )
+
+            for i in items.indices {
+                if let s = scores[items[i].id] {
+                    items[i].cleanupScore = min(1, max(0, s.score))
+                    items[i].cleanupReasons = s.reasons
+                }
+            }
+
+            result.items = items
+            result.videoCount = items.filter { $0.isVideo }.count
+            result.duplicateGroups = self.applyScores(result.duplicateGroups, scores)
+            result.similarGroups = self.applyScores(result.similarGroups, scores)
+
+            // 5) 模糊 / 截图 / 建议 / 分类
+            progress(total, total, "正在整理分类")
             result.blurryItems = items.filter { item in
                 guard !item.isVideo, let s = item.sharpness else { return false }
                 return s < self.blurThreshold
@@ -87,9 +124,119 @@ final class AnalysisEngine {
                 return !item.isVideo && item.isScreenshot
             }
 
+            result.suggestedItems = items
+                .filter { !$0.isVideo && !$0.isFavorite && $0.cleanupScore >= 0.5 }
+                .sorted { $0.cleanupScore > $1.cleanupScore }
+
+            var buckets: [ContentCategory: [PhotoItem]] = [:]
+            for item in items where !item.isVideo {
+                buckets[item.category, default: []].append(item)
+            }
+            result.categoryBuckets = buckets
+
             DispatchQueue.main.async {
                 completion(result)
             }
+        }
+    }
+
+    // MARK: - 清理建议打分
+
+    struct ScoreEntry {
+        var score: Double = 0
+        var reasons: [String] = []
+    }
+
+    /// 把各种信号加起来（0~1）。分数 ≥0.5 才会进「建议清理」。
+    private func buildScores(
+        items: [PhotoItem],
+        duplicates: [PhotoGroup],
+        similar: [PhotoGroup],
+        blur: Double
+    ) -> [String: ScoreEntry] {
+
+        var map: [String: ScoreEntry] = [:]
+
+        func add(_ id: String, _ delta: Double, _ reason: String) {
+            var entry = map[id] ?? ScoreEntry()
+            entry.score += delta
+            if !reason.isEmpty && !entry.reasons.contains(reason) {
+                entry.reasons.append(reason)
+            }
+            map[id] = entry
+        }
+
+        // 完全重复：每组留第一张，其余高分
+        for group in duplicates {
+            guard let keeper = group.items.first else { continue }
+            for item in group.items.dropFirst() {
+                add(item.id, 0.95, "与「\(keeper.displayName)」的文件字节完全相同")
+            }
+        }
+
+        // 相似组：留最清晰的那张
+        for group in similar {
+            let best = group.items.max { ($0.sharpness ?? 0) < ($1.sharpness ?? 0) }
+            let keeperID = best?.id
+            for item in group.items where item.id != keeperID {
+                add(item.id, 0.45, "同组里有一张更清晰的，这张是重复拍的")
+            }
+        }
+
+        for item in items where !item.isVideo {
+            // 模糊
+            if let s = item.sharpness {
+                if s < blur {
+                    add(item.id, 0.75, String(format: "清晰度只有 %.0f，明显糊了", s))
+                } else if s < blur * 1.6 {
+                    add(item.id, 0.35, String(format: "清晰度偏低（%.0f）", s))
+                }
+            }
+
+            // 低信息量：黑屏 / 纯白 / 纯色
+            if item.brightness >= 0 {
+                if item.brightness < 0.05 {
+                    add(item.id, 0.7, "接近全黑，像是误拍或挡住了镜头")
+                } else if item.brightness > 0.97 {
+                    add(item.id, 0.6, "接近纯白，几乎没有内容")
+                } else if item.edgeDensity < 0.012 {
+                    add(item.id, 0.5, "画面几乎没有细节，像纯色图")
+                }
+            }
+
+            // 截图
+            if item.isScreenshot {
+                add(item.id, 0.45, "系统截图")
+            }
+
+            // 网图 / 表情包
+            if item.category == .meme {
+                add(item.id, 0.3, "看着像网图/表情包")
+            }
+
+            // 扣分项：这些通常是「要留的」
+            if item.category == .receipt {
+                add(item.id, -0.45, "")
+            }
+            if item.faceCount > 0 {
+                add(item.id, -0.25, "")
+            }
+        }
+
+        return map
+    }
+
+    private func applyScores(_ groups: [PhotoGroup], _ scores: [String: ScoreEntry]) -> [PhotoGroup] {
+        return groups.map { group in
+            let newItems = group.items.map { item -> PhotoItem in
+                var copy = item
+                if let s = scores[item.id] {
+                    copy.cleanupScore = min(1, max(0, s.score))
+                    copy.cleanupReasons = s.reasons
+                }
+                return copy
+            }
+            return PhotoGroup(items: newItems, isExactDuplicate: group.isExactDuplicate)
         }
     }
 

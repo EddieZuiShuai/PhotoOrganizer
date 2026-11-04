@@ -138,7 +138,6 @@ struct PhotoPreviewView: View {
     let onDelete: (PhotoItem) -> Void
 
     @State private var index: Int
-    @State private var showDeleteConfirm = false
 
     @Environment(\.dismiss) private var dismiss
 
@@ -173,19 +172,6 @@ struct PhotoPreviewView: View {
             }
         }
         .statusBarHidden(true)
-        .alert("删除这张照片？", isPresented: $showDeleteConfirm) {
-            Button("取消", role: .cancel) { }
-            Button("删除", role: .destructive) {
-                guard index >= 0, index < items.count else { return }
-                let item = items[index]
-                dismiss()
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    onDelete(item)
-                }
-            }
-        } message: {
-            Text("删除后会进入「照片」App 的「最近删除」，30 天内可以恢复。")
-        }
     }
 
     private var topBar: some View {
@@ -213,8 +199,14 @@ struct PhotoPreviewView: View {
 
             Spacer()
 
+            // 一步删除：点一下直接交给系统，不再问第二遍
             Button {
-                showDeleteConfirm = true
+                guard index >= 0, index < items.count else { return }
+                let item = items[index]
+                dismiss()
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+                    onDelete(item)
+                }
             } label: {
                 Image(systemName: "trash")
                     .font(.system(size: 15, weight: .semibold))
