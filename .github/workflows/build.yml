@@ -7,8 +7,13 @@ on:
 
 jobs:
   build:
-    runs-on: macos-15
+    name: build (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [macos-15, macos-14]
 
     steps:
       - name: 拉取代码
@@ -41,6 +46,6 @@ jobs:
       - name: 上传安装包
         uses: actions/upload-artifact@v4
         with:
-          name: PhotoOrganizer-ipa
+          name: PhotoOrganizer-ipa-${{ matrix.runner }}
           path: PhotoOrganizer.ipa
           retention-days: 30
