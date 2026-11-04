@@ -1,0 +1,46 @@
+name: Build iOS IPA
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 显示 Xcode 版本
+        run: xcodebuild -version
+
+      - name: 编译（不签名）
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project PhotoOrganizer.xcodeproj \
+            -scheme PhotoOrganizer \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: 打包成 ipa
+        run: |
+          mkdir -p Payload
+          cp -R "build/Build/Products/Release-iphoneos/PhotoOrganizer.app" Payload/
+          zip -r PhotoOrganizer.ipa Payload
+          ls -lh PhotoOrganizer.ipa
+
+      - name: 上传安装包
+        uses: actions/upload-artifact@v4
+        with:
+          name: PhotoOrganizer-ipa
+          path: PhotoOrganizer.ipa
+          retention-days: 30
