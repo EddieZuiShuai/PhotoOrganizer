@@ -672,7 +672,8 @@ struct ResultView: View {
     }
 
     private func itemRow(_ item: PhotoItem, tag: String?) -> some View {
-        HStack(spacing: 12) {
+        let detail = tagText(item)
+        return HStack(spacing: 12) {
             SelectableThumb(
                 item: item,
                 isSelected: selectedIDs.contains(item.id),
@@ -713,7 +714,6 @@ struct ResultView: View {
                     .foregroundColor(.secondary)
                 }
 
-                let detail = tagText(item)
                 if !detail.isEmpty {
                     Text(detail)
                         .font(.system(size: 10))
