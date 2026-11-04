@@ -132,7 +132,7 @@ struct HomeView: View {
                 }
 
                 VStack(alignment: .leading, spacing: 14) {
-                    featureRow(icon: "doc.on.doc", title: "重复照片", desc: "内容完全相同，留一张就够")
+                    featureRow(icon: "doc.on.doc", title: "重复照片", desc: "原图文件完全相同，留一张就够")
                     Divider()
                     featureRow(icon: "square.stack.3d.up", title: "相似照片", desc: "连拍、角度几乎一样的那些")
                     Divider()
@@ -163,7 +163,7 @@ struct HomeView: View {
                         .cornerRadius(12)
                 }
 
-                Text("第一版只做分析和清单，不会删你任何照片。")
+                Text("扫描不改动任何照片。删除前会二次确认，删掉的照片可在「最近删除」里 30 天内恢复。")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
@@ -286,10 +286,18 @@ struct ResultView: View {
 
     @State private var selectedCategory: PhotoCategory = .duplicate
     @State private var selectedIDs: Set<String> = []
+    @State private var deletedIDs: Set<String> = []
+
+    @State private var previewItems: [PhotoItem] = []
+    @State private var previewStart: Int = 0
+    @State private var showPreview = false
+
+    @State private var showDeleteConfirm = false
+    @State private var message: String?
 
     var body: some View {
         VStack(spacing: 0) {
-            summaryBar
+            header
 
             Picker("分类", selection: $selectedCategory) {
                 ForEach(PhotoCategory.allCases) { cat in
@@ -305,23 +313,115 @@ struct ResultView: View {
                     content
                 }
                 .padding(.horizontal, 16)
-                .padding(.bottom, 100)
+                .padding(.bottom, 110)
             }
         }
         .overlay(alignment: .bottom) {
             bottomBar
         }
+        .onChange(of: selectedCategory) { _ in
+            selectedIDs.removeAll()
+        }
+        .confirmationDialog(
+            "删除选中的 \(selectedIDs.count) 张照片？",
+            isPresented: $showDeleteConfirm,
+            titleVisibility: .visible
+        ) {
+            Button("删除 \(selectedIDs.count) 张", role: .destructive) {
+                performDelete()
+            }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("删除后会进入「照片」App 的「最近删除」，30 天内可以恢复。")
+        }
+        .alert("提示", isPresented: Binding(
+            get: { message != nil },
+            set: { if !$0 { message = nil } }
+        )) {
+            Button("知道了", role: .cancel) { message = nil }
+        } message: {
+            Text(message ?? "")
+        }
+        .fullScreenCover(isPresented: $showPreview) {
+            PhotoPreviewView(items: previewItems, startIndex: previewStart) { item in
+                deleteItems([item])
+            }
+        }
     }
 
-    private var summaryBar: some View {
-        HStack(spacing: 10) {
-            summaryItem(title: "照片", value: "\(result.photoCount)", color: Color(red: 0.18, green: 0.49, blue: 0.96))
-            summaryItem(title: "重复组", value: "\(result.duplicateGroups.count)", color: Color(red: 0.85, green: 0.35, blue: 0.2))
-            summaryItem(title: "模糊", value: "\(result.blurryItems.count)", color: Color(red: 0.85, green: 0.6, blue: 0.1))
-            summaryItem(title: "截图", value: "\(result.screenshotItems.count)", color: Color(red: 0.4, green: 0.45, blue: 0.5))
+    // MARK: 过滤后的数据
+
+    private func alive(_ group: PhotoGroup) -> PhotoGroup? {
+        let items = group.items.filter { !deletedIDs.contains($0.id) }
+        guard items.count > 1 else { return nil }
+        return PhotoGroup(items: items, isExactDuplicate: group.isExactDuplicate)
+    }
+
+    private var dupGroups: [PhotoGroup] {
+        result.duplicateGroups.compactMap { alive($0) }
+    }
+
+    private var simGroups: [PhotoGroup] {
+        result.similarGroups.compactMap { alive($0) }
+    }
+
+    private var blurry: [PhotoItem] {
+        result.blurryItems.filter { !deletedIDs.contains($0.id) }
+    }
+
+    private var shots: [PhotoItem] {
+        result.screenshotItems.filter { !deletedIDs.contains($0.id) }
+    }
+
+    private var allVisibleItems: [PhotoItem] {
+        var arr: [PhotoItem] = []
+        arr.append(contentsOf: dupGroups.flatMap { $0.items })
+        arr.append(contentsOf: simGroups.flatMap { $0.items })
+        arr.append(contentsOf: blurry)
+        arr.append(contentsOf: shots)
+        return arr
+    }
+
+    // MARK: 顶部
+
+    private var header: some View {
+        VStack(spacing: 8) {
+            HStack {
+                Text(summaryLine)
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                Spacer()
+                if selectedIDs.isEmpty {
+                    Text("点缩略图可放大")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                } else {
+                    Text("已选 \(selectedIDs.count) 张")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.red)
+                }
+            }
+
+            HStack(spacing: 10) {
+                summaryItem(title: "重复组", value: "\(dupGroups.count)", color: Color(red: 0.85, green: 0.35, blue: 0.2))
+                summaryItem(title: "相似组", value: "\(simGroups.count)", color: Color(red: 0.55, green: 0.35, blue: 0.85))
+                summaryItem(title: "模糊", value: "\(blurry.count)", color: Color(red: 0.85, green: 0.6, blue: 0.1))
+                summaryItem(title: "截图", value: "\(shots.count)", color: Color(red: 0.4, green: 0.45, blue: 0.5))
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 8)
+    }
+
+    private var summaryLine: String {
+        var s = "共 \(result.photoCount) 张照片"
+        if result.videoCount > 0 {
+            s += " · \(result.videoCount) 个视频"
+        }
+        if !deletedIDs.isEmpty {
+            s += " · 已删 \(deletedIDs.count)"
+        }
+        return s
     }
 
     private func summaryItem(title: String, value: String, color: Color) -> some View {
@@ -339,39 +439,41 @@ struct ResultView: View {
         .cornerRadius(10)
     }
 
+    // MARK: 列表内容
+
     @ViewBuilder
     private var content: some View {
         switch selectedCategory {
         case .duplicate:
-            if result.duplicateGroups.isEmpty {
-                emptyHint("没有发现内容完全相同的照片")
+            if dupGroups.isEmpty {
+                emptyHint("没有发现完全相同的照片")
             } else {
-                ForEach(Array(result.duplicateGroups.enumerated()), id: \.element.id) { index, group in
+                ForEach(Array(dupGroups.enumerated()), id: \.element.id) { index, group in
                     groupCard(group: group, index: index + 1)
                 }
             }
         case .similar:
-            if result.similarGroups.isEmpty {
+            if simGroups.isEmpty {
                 emptyHint("没有发现相似照片")
             } else {
-                ForEach(Array(result.similarGroups.enumerated()), id: \.element.id) { index, group in
+                ForEach(Array(simGroups.enumerated()), id: \.element.id) { index, group in
                     groupCard(group: group, index: index + 1)
                 }
             }
         case .blurry:
-            if result.blurryItems.isEmpty {
+            if blurry.isEmpty {
                 emptyHint("没有发现模糊照片")
             } else {
-                ForEach(result.blurryItems) { item in
-                    singleCard(item: item, tag: "模糊")
+                ForEach(blurry) { item in
+                    singleCard(item: item, tag: "模糊", onOpen: { open(item, in: blurry) })
                 }
             }
         case .screenshot:
-            if result.screenshotItems.isEmpty {
+            if shots.isEmpty {
                 emptyHint("没有发现截图")
             } else {
-                ForEach(result.screenshotItems) { item in
-                    singleCard(item: item, tag: "截图")
+                ForEach(shots) { item in
+                    singleCard(item: item, tag: "截图", onOpen: { open(item, in: shots) })
                 }
             }
         }
@@ -401,18 +503,43 @@ struct ResultView: View {
                     .foregroundColor(.secondary)
             }
 
+            Text(group.isExactDuplicate
+                 ? "原图文件字节完全一致（已逐张核对）"
+                 : "内容接近但不完全相同")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+
             ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    ForEach(group.items) { item in
-                        PhotoThumbView(asset: item.asset, size: 76)
+                HStack(spacing: 10) {
+                    ForEach(Array(group.items.enumerated()), id: \.element.id) { idx, item in
+                        SelectableThumb(
+                            item: item,
+                            isSelected: selectedIDs.contains(item.id),
+                            size: 80,
+                            onOpen: { open(item, in: group.items) },
+                            onToggle: { toggle(item.id) }
+                        )
                     }
                 }
+                .padding(.vertical, 2)
             }
 
-            if let first = group.items.first {
-                Text(first.displayName + " · " + first.resolutionText)
-                    .font(.system(size: 11))
-                    .foregroundColor(.secondary)
+            HStack {
+                Button {
+                    selectedIDs.formUnion(group.items.dropFirst().map { $0.id })
+                } label: {
+                    Text("选中其余 \(group.items.count - 1) 张")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(Color(red: 0.85, green: 0.3, blue: 0.2))
+                }
+
+                Spacer()
+
+                if let first = group.items.first {
+                    Text(first.displayName)
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
             }
         }
         .padding(14)
@@ -420,16 +547,28 @@ struct ResultView: View {
         .cornerRadius(12)
     }
 
-    private func singleCard(item: PhotoItem, tag: String) -> some View {
+    private func singleCard(item: PhotoItem, tag: String, onOpen: @escaping () -> Void) -> some View {
         HStack(spacing: 12) {
-            PhotoThumbView(asset: item.asset, size: 64)
+            SelectableThumb(
+                item: item,
+                isSelected: selectedIDs.contains(item.id),
+                size: 66,
+                onOpen: onOpen,
+                onToggle: { toggle(item.id) }
+            )
 
             VStack(alignment: .leading, spacing: 4) {
                 Text(item.displayName)
                     .font(.system(size: 14, weight: .medium))
-                Text(item.resolutionText)
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
+                HStack(spacing: 6) {
+                    Text(item.resolutionText)
+                    if !item.sizeText.isEmpty {
+                        Text("·")
+                        Text(item.sizeText)
+                    }
+                }
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
                 if let s = item.sharpness {
                     Text(String(format: "清晰度 %.1f", s))
                         .font(.system(size: 11))
@@ -452,41 +591,111 @@ struct ResultView: View {
         .cornerRadius(12)
     }
 
+    // MARK: 底部操作栏
+
     private var bottomBar: some View {
         VStack(spacing: 0) {
             Divider()
-            HStack(spacing: 12) {
-                Button(action: onRestart) {
-                    Text("重新扫描")
-                        .font(.system(size: 15))
-                        .foregroundColor(.primary)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 13)
-                        .background(Color.black.opacity(0.05))
-                        .cornerRadius(10)
-                }
 
-                ShareLink(item: exportText()) {
-                    Text("导出清单")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(.white)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 13)
-                        .background(Color(red: 0.18, green: 0.49, blue: 0.96))
-                        .cornerRadius(10)
+            if selectedIDs.isEmpty {
+                HStack(spacing: 12) {
+                    Button(action: onRestart) {
+                        Text("重新扫描")
+                            .font(.system(size: 15))
+                            .foregroundColor(.primary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Color.black.opacity(0.05))
+                            .cornerRadius(10)
+                    }
+
+                    ShareLink(item: exportText()) {
+                        Text("导出清单")
+                            .font(.system(size: 15, weight: .medium))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Color(red: 0.18, green: 0.49, blue: 0.96))
+                            .cornerRadius(10)
+                    }
+                }
+                .padding(16)
+            } else {
+                HStack(spacing: 12) {
+                    Button {
+                        selectedIDs.removeAll()
+                    } label: {
+                        Text("取消")
+                            .font(.system(size: 15))
+                            .foregroundColor(.primary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Color.black.opacity(0.05))
+                            .cornerRadius(10)
+                    }
+
+                    Button {
+                        showDeleteConfirm = true
+                    } label: {
+                        Text("删除 \(selectedIDs.count) 张")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundColor(.white)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 13)
+                            .background(Color.red)
+                            .cornerRadius(10)
+                    }
+                }
+                .padding(16)
+            }
+        }
+        .background(Color.white)
+    }
+
+    // MARK: 行为
+
+    private func toggle(_ id: String) {
+        if selectedIDs.contains(id) {
+            selectedIDs.remove(id)
+        } else {
+            selectedIDs.insert(id)
+        }
+    }
+
+    private func open(_ item: PhotoItem, in list: [PhotoItem]) {
+        guard let idx = list.firstIndex(where: { $0.id == item.id }) else { return }
+        previewItems = list
+        previewStart = idx
+        showPreview = true
+    }
+
+    private func performDelete() {
+        let items = allVisibleItems.filter { selectedIDs.contains($0.id) }
+        guard !items.isEmpty else { return }
+        deleteItems(items)
+    }
+
+    private func deleteItems(_ items: [PhotoItem]) {
+        let assets = items.map { $0.asset }
+        PhotoLibraryService.shared.delete(assets: assets) { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    deletedIDs.formUnion(items.map { $0.id })
+                    selectedIDs.subtract(Set(items.map { $0.id }))
+                    message = "已删除 \(items.count) 张照片，可在「照片 → 最近删除」里恢复。"
+                } else {
+                    message = "删除失败：" + (error?.localizedDescription ?? "未知原因")
                 }
             }
-            .padding(16)
-            .background(Color.white)
         }
     }
 
     private func count(for cat: PhotoCategory) -> Int {
         switch cat {
-        case .duplicate: return result.duplicateGroups.count
-        case .similar: return result.similarGroups.count
-        case .blurry: return result.blurryItems.count
-        case .screenshot: return result.screenshotItems.count
+        case .duplicate: return dupGroups.count
+        case .similar: return simGroups.count
+        case .blurry: return blurry.count
+        case .screenshot: return shots.count
         }
     }
 
@@ -496,15 +705,26 @@ struct ResultView: View {
         lines.append("生成时间：" + DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .short))
         lines.append("")
         lines.append("照片总数：\(result.photoCount)")
-        lines.append("重复组：\(result.duplicateGroups.count)")
-        lines.append("相似组：\(result.similarGroups.count)")
-        lines.append("模糊：\(result.blurryItems.count)")
-        lines.append("截图：\(result.screenshotItems.count)")
+        lines.append("重复组：\(dupGroups.count)")
+        lines.append("相似组：\(simGroups.count)")
+        lines.append("模糊：\(blurry.count)")
+        lines.append("截图：\(shots.count)")
         lines.append("")
 
-        if !result.duplicateGroups.isEmpty {
-            lines.append("—— 重复组 ——")
-            for (i, g) in result.duplicateGroups.enumerated() {
+        if !dupGroups.isEmpty {
+            lines.append("—— 重复组（原图文件完全相同）——")
+            for (i, g) in dupGroups.enumerated() {
+                lines.append("组 \(i + 1)（\(g.items.count) 张）")
+                for item in g.items {
+                    lines.append("  · \(item.displayName)  \(item.resolutionText)  \(item.sizeText)")
+                }
+            }
+            lines.append("")
+        }
+
+        if !simGroups.isEmpty {
+            lines.append("—— 相似组（内容接近，不完全相同）——")
+            for (i, g) in simGroups.enumerated() {
                 lines.append("组 \(i + 1)（\(g.items.count) 张）")
                 for item in g.items {
                     lines.append("  · \(item.displayName)  \(item.resolutionText)")
@@ -513,22 +733,61 @@ struct ResultView: View {
             lines.append("")
         }
 
-        if !result.blurryItems.isEmpty {
+        if !blurry.isEmpty {
             lines.append("—— 模糊照片 ——")
-            for item in result.blurryItems {
+            for item in blurry {
                 lines.append("  · \(item.displayName)  \(item.resolutionText)")
             }
             lines.append("")
         }
 
-        if !result.screenshotItems.isEmpty {
+        if !shots.isEmpty {
             lines.append("—— 截图 ——")
-            for item in result.screenshotItems {
+            for item in shots {
                 lines.append("  · \(item.displayName)  \(item.resolutionText)")
             }
         }
 
         return lines.joined(separator: "\n")
+    }
+}
+
+// MARK: - 可勾选的缩略图
+
+struct SelectableThumb: View {
+    let item: PhotoItem
+    let isSelected: Bool
+    var size: CGFloat = 76
+    let onOpen: () -> Void
+    let onToggle: () -> Void
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Button(action: onOpen) {
+                PhotoThumbView(asset: item.asset, size: size)
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 8)
+                            .stroke(isSelected ? Color.red : Color.clear, lineWidth: 2.5)
+                    )
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onToggle) {
+                ZStack {
+                    Circle()
+                        .fill(isSelected ? Color.red : Color.black.opacity(0.35))
+                        .frame(width: 22, height: 22)
+                    if isSelected {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 11, weight: .bold))
+                            .foregroundColor(.white)
+                    }
+                }
+            }
+            .buttonStyle(.plain)
+            .padding(4)
+        }
+        .frame(width: size, height: size)
     }
 }
 

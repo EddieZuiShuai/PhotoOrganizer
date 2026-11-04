@@ -1,8 +1,9 @@
 import Foundation
 import Photos
 import UIKit
+import CryptoKit
 
-/// 负责与系统相册打交道：权限、取资产、取缩略图、取文件大小。
+/// 负责与系统相册打交道：权限、取资产、取缩略图、算原图哈希、删除。
 final class PhotoLibraryService {
 
     static let shared = PhotoLibraryService()
@@ -61,7 +62,6 @@ final class PhotoLibraryService {
             contentMode: .aspectFit,
             options: options
         ) { image, info in
-            // 忽略降质版本，只保留最终图
             if let degraded = info?[PHImageResultIsDegradedKey] as? Bool, degraded {
                 return
             }
@@ -77,6 +77,67 @@ final class PhotoLibraryService {
         return thumbnail(for: asset, maxPixel: 320)
     }
 
+    /// 详情页用的大图（异步，允许从 iCloud 下载）
+    func loadImage(for asset: PHAsset, targetSize: CGSize, completion: @escaping (UIImage?) -> Void) {
+        let options = PHImageRequestOptions()
+        options.isSynchronous = false
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .exact
+        options.isNetworkAccessAllowed = true
+
+        PHImageManager.default().requestImage(
+            for: asset,
+            targetSize: targetSize,
+            contentMode: .aspectFit,
+            options: options
+        ) { image, info in
+            if let degraded = info?[PHImageResultIsDegradedKey] as? Bool, degraded {
+                return
+            }
+            completion(image)
+        }
+    }
+
+    // MARK: - 原图数据 / 哈希
+
+    /// 读取照片原始文件数据（用于算「完全重复」的字节哈希）。
+    /// 注意：这一步是真实读盘，只对候选照片调用。
+    func originalData(of asset: PHAsset) -> Data? {
+        let resources = PHAssetResource.assetResources(for: asset)
+        let candidate = resources.first(where: { $0.type == .photo || $0.type == .fullSizePhoto })
+            ?? resources.first(where: { $0.type != .pairedVideo })
+        guard let resource = candidate else { return nil }
+
+        let options = PHAssetResourceRequestOptions()
+        options.isNetworkAccessAllowed = true
+
+        var data = Data()
+        var failure = false
+        let sem = DispatchSemaphore(value: 0)
+
+        PHAssetResourceManager.default().requestData(
+            for: resource,
+            options: options,
+            dataReceivedHandler: { chunk in
+                data.append(chunk)
+            },
+            completionHandler: { error in
+                failure = (error != nil)
+                sem.signal()
+            }
+        )
+        sem.wait()
+
+        if failure || data.isEmpty { return nil }
+        return data
+    }
+
+    /// SHA-256（十六进制字符串）
+    func sha256Hex(_ data: Data) -> String {
+        let digest = SHA256.hash(data: data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
     // MARK: - 文件大小
 
     /// 读取原始文件大小（字节）。失败返回 0。
@@ -90,5 +151,20 @@ final class PhotoLibraryService {
             return Int64(size)
         }
         return 0
+    }
+
+    // MARK: - 删除
+
+    /// 删除照片。系统会再弹一次确认，删除后进入「最近删除」，30 天内可恢复。
+    func delete(assets: [PHAsset], completion: @escaping (Bool, Error?) -> Void) {
+        guard !assets.isEmpty else {
+            completion(true, nil)
+            return
+        }
+        PHPhotoLibrary.shared().performChanges({
+            PHAssetChangeRequest.deleteAssets(assets as NSArray)
+        }, completionHandler: { success, error in
+            completion(success, error)
+        })
     }
 }

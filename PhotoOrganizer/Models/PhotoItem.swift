@@ -15,6 +15,8 @@ struct PhotoItem: Identifiable {
     var dHash: UInt64? = nil
     /// 清晰度（拉普拉斯方差），越小越模糊
     var sharpness: Double? = nil
+    /// 原图文件大小（字节），用于「完全重复」的快速排除
+    var fileSize: Int64 = 0
 
     var displayName: String {
         let f = DateFormatter()
@@ -25,13 +27,26 @@ struct PhotoItem: Identifiable {
     var resolutionText: String {
         "\(pixelWidth) × \(pixelHeight)"
     }
+
+    var sizeText: String {
+        guard fileSize > 0 else { return "" }
+        let mb = Double(fileSize) / 1024.0 / 1024.0
+        if mb >= 1 {
+            return String(format: "%.1f MB", mb)
+        }
+        return String(format: "%.0f KB", Double(fileSize) / 1024.0)
+    }
 }
 
 /// 一组成员（重复组或相似组）
 struct PhotoGroup: Identifiable {
-    let id = UUID()
     let items: [PhotoItem]
     let isExactDuplicate: Bool
+
+    /// 用首张照片的 id 作为组的稳定标识，避免每次渲染都换 id 导致列表闪动
+    var id: String {
+        return items.first?.id ?? "empty"
+    }
 }
 
 /// 全量分析结果

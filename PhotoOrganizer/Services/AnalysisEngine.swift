@@ -3,15 +3,23 @@ import Photos
 import UIKit
 
 /// 核心分析引擎：读图 → 算哈希 → 算清晰度 → 聚类分组。
+///
+/// 判定口径（重要）：
+/// - **完全重复**：原图文件的 SHA-256 一致（字节级完全相同），且尺寸一致。
+///   只有拿到「确凿证据」才标重复，避免误判。
+/// - **相似**：dHash 汉明距离 ≤ similarDistance，但字节不同。
+///   用「星型聚类」（只和种子比），不做传递合并，避免 A 像 B、B 像 C 就把 A/C 并成一组。
 final class AnalysisEngine {
 
     static let shared = AnalysisEngine()
     private init() {}
 
-    /// 模糊阈值：拉普拉斯方差低于此值判为模糊（可在设置里调）
+    /// 模糊阈值：拉普拉斯方差低于此值判为模糊
     var blurThreshold: Double = 25.0
     /// 相似阈值：dHash 汉明距离小于等于此值判为相似
     var similarDistance: Int = 8
+    /// 「完全重复」的候选预筛距离：只有哈希非常接近的才会去核对原图字节
+    var exactCandidateDistance: Int = 3
 
     // MARK: - 主流程
 
@@ -42,9 +50,12 @@ final class AnalysisEngine {
                     isVideo: isVideo
                 )
 
-                if !isVideo, let thumb = library.thumbnail(for: asset, maxPixel: 256) {
-                    item.dHash = self.dHash(from: thumb)
-                    item.sharpness = self.sharpness(from: thumb)
+                if !isVideo {
+                    item.fileSize = library.fileSize(of: asset)
+                    if let thumb = library.thumbnail(for: asset, maxPixel: 256) {
+                        item.dHash = self.dHash(from: thumb)
+                        item.sharpness = self.sharpness(from: thumb)
+                    }
                 }
 
                 items.append(item)
@@ -57,13 +68,16 @@ final class AnalysisEngine {
             result.items = items
             result.videoCount = items.filter { $0.isVideo }.count
 
-            // 2) 分组
-            progress(total, total, "正在比对重复与相似")
-            let pair = self.groupPhotos(items: items)
-            result.duplicateGroups = pair.0
-            result.similarGroups = pair.1
+            // 2) 完全重复（读原图字节核对）
+            progress(total, total, "正在核对完全重复（读取原图，稍慢）")
+            let exact = self.findExactGroups(items: items, progress: progress, total: total)
+            result.duplicateGroups = exact.groups
 
-            // 3) 模糊 / 截图
+            // 3) 相似（排除已经是完全重复的）
+            progress(total, total, "正在比对相似照片")
+            result.similarGroups = self.findSimilarGroups(items: items, excluding: exact.memberIDs)
+
+            // 4) 模糊 / 截图
             progress(total, total, "正在挑出模糊与截图")
             result.blurryItems = items.filter { item in
                 guard !item.isVideo, let s = item.sharpness else { return false }
@@ -79,75 +93,142 @@ final class AnalysisEngine {
         }
     }
 
-    // MARK: - 分组
+    // MARK: - 分桶（只按分辨率分，避免同名尺寸跨日期漏判）
 
-    private func groupPhotos(items: [PhotoItem]) -> ([PhotoGroup], [PhotoGroup]) {
+    private func candidateBuckets(_ photos: [PhotoItem]) -> [[Int]] {
+        var bySize: [String: [Int]] = [:]
+        for (i, p) in photos.enumerated() {
+            bySize["\(p.pixelWidth)x\(p.pixelHeight)", default: []].append(i)
+        }
+
+        var buckets: [[Int]] = []
+        for (_, arr) in bySize {
+            if arr.count <= 2500 {
+                buckets.append(arr)
+            } else {
+                // 桶太大时再按年份切一刀，控制两两比较量
+                var byYear: [Int: [Int]] = [:]
+                for i in arr {
+                    let year = Calendar.current.component(.year, from: photos[i].creationDate ?? Date(timeIntervalSince1970: 0))
+                    byYear[year, default: []].append(i)
+                }
+                buckets.append(contentsOf: byYear.values)
+            }
+        }
+        return buckets
+    }
+
+    // MARK: - 完全重复：原图 SHA-256 逐一核对
+
+    private func findExactGroups(
+        items: [PhotoItem],
+        progress: @escaping (Int, Int, String) -> Void,
+        total: Int
+    ) -> (groups: [PhotoGroup], memberIDs: Set<String>) {
+
         let photos = items.filter { !$0.isVideo && $0.dHash != nil }
         guard photos.count > 1 else { return ([], []) }
 
-        // 按「尺寸 + 年月日」分桶，避免全量两两比较
-        var buckets: [String: [Int]] = [:]
-        let cal = Calendar.current
-        for (i, item) in photos.enumerated() {
-            let day = item.creationDate ?? Date(timeIntervalSince1970: 0)
-            let comps = cal.dateComponents([.year, .month, .day], from: day)
-            let key = "\(item.pixelWidth)x\(item.pixelHeight)-\(comps.year ?? 0)-\(comps.month ?? 0)-\(comps.day ?? 0)"
-            buckets[key, default: []].append(i)
-        }
-
         var uf = UnionFind(photos.count)
+        var hashCache: [Int: String] = [:]
+        var attempted = Set<Int>()
+        var hashedCount = 0
 
-        for (_, indices) in buckets {
-            guard indices.count > 1 else { continue }
-            for a in 0..<(indices.count - 1) {
-                for b in (a + 1)..<indices.count {
-                    let i = indices[a]
-                    let j = indices[b]
-                    guard let ha = photos[i].dHash, let hb = photos[j].dHash else { continue }
-                    let dist = hammingDistance(ha, hb)
-                    if dist <= similarDistance {
-                        uf.union(i, j)
+        // 读原图算 SHA-256（同一张只算一次）
+        func sha(_ i: Int) -> String? {
+            if let cached = hashCache[i] { return cached }
+            if attempted.contains(i) { return nil }
+            attempted.insert(i)
+
+            guard let data = PhotoLibraryService.shared.originalData(of: photos[i].asset) else {
+                return nil
+            }
+            let hex = PhotoLibraryService.shared.sha256Hex(data)
+            hashCache[i] = hex
+            hashedCount += 1
+            if hashedCount % 5 == 0 {
+                progress(total, total, "正在核对完全重复（已读 \(hashedCount) 张原图）")
+            }
+            return hex
+        }
+
+        for bucket in candidateBuckets(photos) where bucket.count > 1 {
+            for a in 0..<(bucket.count - 1) {
+                let i = bucket[a]
+                let pi = photos[i]
+                guard let hi = pi.dHash else { continue }
+
+                for b in (a + 1)..<bucket.count {
+                    let j = bucket[b]
+                    let pj = photos[j]
+                    guard let hj = pj.dHash else { continue }
+                    guard hammingDistance(hi, hj) <= exactCandidateDistance else { continue }
+
+                    // 文件大小不同，直接排除（省掉一次读盘）
+                    if pi.fileSize > 0 && pj.fileSize > 0 && pi.fileSize != pj.fileSize {
+                        continue
                     }
+                    guard let si = sha(i), let sj = sha(j), si == sj else { continue }
+                    uf.union(i, j)
                 }
             }
         }
 
-        // 汇总成组
-        var groupsByRoot: [Int: [Int]] = [:]
+        var byRoot: [Int: [Int]] = [:]
         for i in 0..<photos.count {
-            groupsByRoot[uf.find(i), default: []].append(i)
+            byRoot[uf.find(i), default: []].append(i)
         }
 
-        var dupGroups: [PhotoGroup] = []
-        var simGroups: [PhotoGroup] = []
+        var groups: [PhotoGroup] = []
+        var memberIDs = Set<String>()
 
-        for (_, indices) in groupsByRoot {
-            guard indices.count > 1 else { continue }
-            let members = indices.map { photos[$0] }
+        for (_, idxs) in byRoot where idxs.count > 1 {
+            // 同一连通分量内的成员必然共享同一个 SHA（相等可传递）
+            let members = idxs.map { photos[$0] }
+            groups.append(PhotoGroup(items: members, isExactDuplicate: true))
+            for m in members { memberIDs.insert(m.id) }
+        }
 
-            // 组内若存在 dHash 完全一致，视为「重复」，否则「相似」
-            var hasExact = false
-            if members.count > 1 {
-                outer: for a in 0..<(members.count - 1) {
-                    for b in (a + 1)..<members.count {
-                        if let ha = members[a].dHash, let hb = members[b].dHash, ha == hb {
-                            hasExact = true
-                            break outer
-                        }
+        groups.sort { $0.items.count > $1.items.count }
+        return (groups, memberIDs)
+    }
+
+    // MARK: - 相似：星型聚类（不做传递合并）
+
+    private func findSimilarGroups(items: [PhotoItem], excluding: Set<String>) -> [PhotoGroup] {
+        let photos = items.filter {
+            !$0.isVideo && $0.dHash != nil && !excluding.contains($0.id)
+        }
+        guard photos.count > 1 else { return [] }
+
+        var assigned = [Bool](repeating: false, count: photos.count)
+        var groups: [PhotoGroup] = []
+
+        for bucket in candidateBuckets(photos) where bucket.count > 1 {
+            for a in 0..<bucket.count {
+                let i = bucket[a]
+                if assigned[i] { continue }
+                guard let hi = photos[i].dHash else { continue }
+
+                var members: [Int] = [i]
+                for b in 0..<bucket.count where b != a {
+                    let j = bucket[b]
+                    if assigned[j] { continue }
+                    guard let hj = photos[j].dHash else { continue }
+                    if hammingDistance(hi, hj) <= similarDistance {
+                        members.append(j)
                     }
                 }
-            }
 
-            if hasExact {
-                dupGroups.append(PhotoGroup(items: members, isExactDuplicate: true))
-            } else {
-                simGroups.append(PhotoGroup(items: members, isExactDuplicate: false))
+                if members.count > 1 {
+                    for m in members { assigned[m] = true }
+                    groups.append(PhotoGroup(items: members.map { photos[$0] }, isExactDuplicate: false))
+                }
             }
         }
 
-        dupGroups.sort { $0.items.count > $1.items.count }
-        simGroups.sort { $0.items.count > $1.items.count }
-        return (dupGroups, simGroups)
+        groups.sort { $0.items.count > $1.items.count }
+        return groups
     }
 
     // MARK: - 差分哈希
