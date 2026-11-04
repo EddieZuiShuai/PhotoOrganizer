@@ -27,9 +27,17 @@ final class VideoCompressor {
         }
     }
 
-    /// 返回 (原大小, 新大小)。若压缩后没变小（new >= old），说明没必要压，
+    /// 压缩结果
+    struct Outcome {
+        let oldSize: Int64
+        let newSize: Int64
+        /// 原片有没有真的删掉（系统会弹一次确认，用户点了「不允许」就是 false）
+        let originalDeleted: Bool
+    }
+
+    /// 返回 Outcome。若压缩后没变小（new >= old），说明没必要压，
     /// 此时没有写入、也没有删除原片。
-    func compress(asset: PHAsset, completion: @escaping (Result<(Int64, Int64), Error>) -> Void) {
+    func compress(asset: PHAsset, completion: @escaping (Result<Outcome, Error>) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             do {
                 let oldSize = PhotoLibraryService.shared.fileSize(of: asset)
@@ -44,14 +52,16 @@ final class VideoCompressor {
 
                 // 没变小就别动原片（有些视频本来就是 720p 以下）
                 guard oldSize <= 0 || newSize < Int64(Double(oldSize) * 0.97) else {
-                    DispatchQueue.main.async { completion(.success((oldSize, newSize))) }
+                    let outcome = Outcome(oldSize: oldSize, newSize: newSize, originalDeleted: false)
+                    DispatchQueue.main.async { completion(.success(outcome)) }
                     return
                 }
 
                 try self.saveToLibrary(output, from: asset)
-                self.deleteOriginal(asset)
+                let deleted = self.deleteOriginal(asset)
 
-                DispatchQueue.main.async { completion(.success((oldSize, newSize))) }
+                let outcome = Outcome(oldSize: oldSize, newSize: newSize, originalDeleted: deleted)
+                DispatchQueue.main.async { completion(.success(outcome)) }
             } catch {
                 DispatchQueue.main.async { completion(.failure(error)) }
             }
@@ -135,9 +145,15 @@ final class VideoCompressor {
         }
     }
 
-    private func deleteOriginal(_ asset: PHAsset) {
-        _ = try? PHPhotoLibrary.shared().performChangesAndWait {
-            PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+    @discardableResult
+    private func deleteOriginal(_ asset: PHAsset) -> Bool {
+        do {
+            try PHPhotoLibrary.shared().performChangesAndWait {
+                PHAssetChangeRequest.deleteAssets([asset] as NSArray)
+            }
+            return true
+        } catch {
+            return false
         }
     }
 

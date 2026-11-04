@@ -421,7 +421,7 @@ struct ResultView: View {
             }
             Button("取消", role: .cancel) { confirmCompress = nil }
         } message: {
-            Text("转成 720p 后写入相册新文件，原片移到「最近删除」，30 天内可恢复。大视频要几分钟，期间别锁屏。")
+            Text("转成 720p 后存成相册里的新视频；紧接着系统会再问一次「是否删除原片」，点「删除」才算替换完成。大视频要几分钟，期间别锁屏。")
         }
         .onChange(of: albumChoice) { choice in
             reloadAlbumIDs(choice)
@@ -1236,22 +1236,30 @@ struct ResultView: View {
         VideoCompressor.shared.compress(asset: item.asset) { result in
             compressingID = nil
             switch result {
-            case .success(let sizes):
-                let old = sizes.0
-                let new = sizes.1
+            case .success(let outcome):
+                let old = outcome.oldSize
+                let new = outcome.newSize
                 if old <= 0 {
                     if new > 0 {
-                        deletedIDs.insert(item.id)
-                        selectedIDs.remove(item.id)
-                        showToast("已压缩到 \(byteText(new))")
+                        if outcome.originalDeleted {
+                            deletedIDs.insert(item.id)
+                            selectedIDs.remove(item.id)
+                        }
+                        showToast("已压缩到 " + byteText(new))
                     }
                 } else if new <= 0 || new >= Int64(Double(old) * 0.97) {
                     showToast("这段已经很省空间了，压缩不划算，已保留原片")
                 } else {
-                    deletedIDs.insert(item.id)
-                    selectedIDs.remove(item.id)
+                    if outcome.originalDeleted {
+                        deletedIDs.insert(item.id)
+                        selectedIDs.remove(item.id)
+                    }
                     let saved = Int(Double(old - new) / Double(old) * 100)
-                    showToast("已压缩 \(byteText(old)) → \(byteText(new))，省 \(saved)%")
+                    var text = "已压缩 " + byteText(old) + " → " + byteText(new) + "，省 \(saved)%"
+                    if !outcome.originalDeleted {
+                        text += "；原片没删掉，请手动删"
+                    }
+                    showToast(text)
                 }
             case .failure(let error):
                 message = "压缩失败：" + error.localizedDescription
