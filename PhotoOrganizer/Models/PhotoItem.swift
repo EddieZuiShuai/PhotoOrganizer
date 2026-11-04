@@ -42,8 +42,14 @@ struct PhotoItem: Identifiable {
 
     /// 差分感知哈希（64 位），用于找重复/相似
     var dHash: UInt64? = nil
-    /// 清晰度（拉普拉斯方差），越小越模糊
+    /// 清晰度（做过对比度拉伸的拉普拉斯方差），越小越模糊
     var sharpness: Double? = nil
+    /// 0~100 的展示分：100 ≈ 本相册的中位清晰度，越低越糊
+    var sharpnessScore: Double = -1
+    /// 亮度跨度（2%~98% 分位差）。太小说明是纯色/近黑，不参与模糊判定
+    var contrastRange: Double = 0
+    /// 画面几乎没有细节（近黑 / 近白 / 纯色）
+    var isLowDetail: Bool = false
     /// 原图文件大小（字节），用于「完全重复」的快速排除
     var fileSize: Int64 = 0
 
@@ -122,6 +128,9 @@ struct AnalysisResult {
     var suggestedItems: [PhotoItem] = []
     /// 按内容分类分组
     var categoryBuckets: [ContentCategory: [PhotoItem]] = [:]
+
+    /// 模糊判定参考值：全库清晰度中位数。界面上的「灵敏度」按它的比例来分档。
+    var blurReference: Double = 1
 
     var photoCount: Int {
         items.filter { !$0.isVideo }.count

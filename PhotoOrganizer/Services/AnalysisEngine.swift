@@ -14,7 +14,8 @@ final class AnalysisEngine {
     static let shared = AnalysisEngine()
     private init() {}
 
-    /// 模糊阈值：拉普拉斯方差低于此值判为模糊
+    /// 模糊判定：现在的口径是「和本相册的中位清晰度比」，
+    /// 这个绝对值只作为兜底（低于它的任何照片都不算清晰）。
     var blurThreshold: Double = 25.0
     /// 相似阈值：dHash 汉明距离小于等于此值判为相似
     var similarDistance: Int = 8
@@ -56,9 +57,17 @@ final class AnalysisEngine {
                 item.fileSize = library.fileSize(of: asset)
 
                 if !isVideo {
-                    if let thumb = library.thumbnail(for: asset, maxPixel: 256) {
+                    // 320 比原来的 256 多留一点细节，模糊判断才不至于「全都看着挺锐」
+                    if let thumb = library.thumbnail(for: asset, maxPixel: 320) {
                         item.dHash = self.dHash(from: thumb)
-                        item.sharpness = self.sharpness(from: thumb)
+
+                        // 清晰度：先做对比度拉伸再算拉普拉斯方差，
+                        // 否则「阴天/室内/夜景」这类低对比照片会被误判成糊片
+                        if let detail = self.sharpnessDetail(from: thumb) {
+                            item.sharpness = detail.lapVar
+                            item.contrastRange = detail.contrast
+                            item.isLowDetail = detail.lowDetail
+                        }
 
                         let st = ContentAnalyzer.shared.stats(from: thumb)
                         item.brightness = st.brightness
@@ -84,6 +93,24 @@ final class AnalysisEngine {
                 }
             }
 
+            // 1.5) 清晰度参考值：本相册自己的中位数。
+            //      「是否模糊」永远是个相对判断——用同一个人的手机、同一批照片当基准最靠谱。
+            var refs: [Double] = []
+            refs.reserveCapacity(items.count)
+            for it in items where !it.isVideo && !it.isScreenshot && !it.isLowDetail {
+                if let s = it.sharpness, s > 0 {
+                    refs.append(s)
+                }
+            }
+            refs.sort()
+            let ref = refs.isEmpty ? 1 : max(1, refs[refs.count / 2])
+            result.blurReference = ref
+            for i in items.indices {
+                if let s = items[i].sharpness {
+                    items[i].sharpnessScore = min(100, 100 * s / ref)
+                }
+            }
+
             // 2) 完全重复（读原图字节核对）
             progress(total, total, "正在核对完全重复（读取原图，稍慢）")
             let exact = self.findExactGroups(items: items, progress: progress, total: total)
@@ -99,7 +126,7 @@ final class AnalysisEngine {
                 items: items,
                 duplicates: result.duplicateGroups,
                 similar: result.similarGroups,
-                blur: self.blurThreshold
+                blurReference: ref
             )
 
             for i in items.indices {
@@ -116,9 +143,11 @@ final class AnalysisEngine {
 
             // 5) 模糊 / 截图 / 建议 / 分类
             progress(total, total, "正在整理分类")
+            // 候选池放宽一档，界面上的「宽松/标准/严格」再从这个池子里筛，改灵敏度不用重扫
             result.blurryItems = items.filter { item in
-                guard !item.isVideo, let s = item.sharpness else { return false }
-                return s < self.blurThreshold
+                guard !item.isVideo, !item.isScreenshot, !item.isLowDetail,
+                      let s = item.sharpness, s > 0 else { return false }
+                return s < 320 && s / ref < 0.8
             }
             result.screenshotItems = items.filter { item in
                 return !item.isVideo && item.isScreenshot
@@ -152,7 +181,7 @@ final class AnalysisEngine {
         items: [PhotoItem],
         duplicates: [PhotoGroup],
         similar: [PhotoGroup],
-        blur: Double
+        blurReference: Double
     ) -> [String: ScoreEntry] {
 
         var map: [String: ScoreEntry] = [:]
@@ -184,12 +213,15 @@ final class AnalysisEngine {
         }
 
         for item in items where !item.isVideo {
-            // 模糊
-            if let s = item.sharpness {
-                if s < blur {
-                    add(item.id, 0.75, String(format: "清晰度只有 %.0f，明显糊了", s))
-                } else if s < blur * 1.6 {
-                    add(item.id, 0.35, String(format: "清晰度偏低（%.0f）", s))
+            // 模糊：只和「本相册自己的中位清晰度」比，避免不同机型/光线条件误伤。
+            // 绝对值再卡一道，和界面「标准」档保持一致，免得建议清理里塞进一堆其实还行的照片。
+            if let s = item.sharpness, s > 0, !item.isLowDetail, !item.isScreenshot {
+                let score = Int(item.sharpnessScore.rounded())
+                let ratio = s / max(1, blurReference)
+                if ratio < 0.45 && s < 180 {
+                    add(item.id, 0.75, "清晰度只有 \(score)/100，比相册里大部分照片糊")
+                } else if ratio < 0.7 && s < 290 {
+                    add(item.id, 0.3, "清晰度偏低（\(score)/100）")
                 }
             }
 
@@ -398,35 +430,81 @@ final class AnalysisEngine {
         return (a ^ b).nonzeroBitCount
     }
 
-    // MARK: - 清晰度（拉普拉斯方差）
+    // MARK: - 清晰度（对比度归一化后的拉普拉斯方差）
 
-    func sharpness(from image: UIImage) -> Double? {
-        let w = 128
-        let h = 128
+    struct SharpnessDetail {
+        var lapVar: Double
+        var contrast: Double
+        var meanLuma: Double
+        var lowDetail: Bool
+    }
+
+    /// 为什么不再直接用「拉普拉斯方差」：
+    /// 同一张清楚的夜景/室内照，因为整体对比度低，方差会被压得很小，被误判成糊片。
+    /// 所以先按 2%~98% 分位把亮度拉伸到 0~255，再算方差；同时把近黑、近白、纯色单独标出来，
+    /// 它们属于「没内容」而不是「没对上焦」。
+    func sharpnessDetail(from image: UIImage) -> SharpnessDetail? {
+        let w = 160
+        let h = 160
         guard let gray = grayscalePixels(from: image, width: w, height: h) else { return nil }
 
+        // 1) 直方图 + 分位数
+        var hist = [Int](repeating: 0, count: 256)
         var sum = 0.0
-        var sumSq = 0.0
-        var count = 0
+        for v in gray {
+            hist[Int(v)] += 1
+            sum += Double(v)
+        }
+        let n = Double(gray.count)
+        let meanLuma = sum / n / 255.0
 
+        func percentile(_ p: Double) -> Double {
+            let target = max(1, Int(n * p))
+            var acc = 0
+            for i in 0..<256 {
+                acc += hist[i]
+                if acc >= target { return Double(i) }
+            }
+            return 255
+        }
+
+        let lo = percentile(0.02)
+        let hi = percentile(0.98)
+        let contrast = max(0, hi - lo)
+
+        // 近黑 / 近白 / 几乎没对比：属于「没内容」，不参与模糊判定
+        if meanLuma < 0.045 || meanLuma > 0.985 || contrast < 8 {
+            return SharpnessDetail(lapVar: 0, contrast: contrast, meanLuma: meanLuma, lowDetail: true)
+        }
+
+        // 2) 对比度拉伸到 0~255
+        let scale = 255.0 / max(contrast, 1)
+        var stretched = [Float](repeating: 0, count: w * h)
+        for i in 0..<(w * h) {
+            let v = (Double(gray[i]) - lo) * scale
+            stretched[i] = Float(min(255.0, max(0.0, v)))
+        }
+
+        // 3) 拉普拉斯方差
+        var s1 = 0.0
+        var s2 = 0.0
+        var count = 0
         for y in 1..<(h - 1) {
             for x in 1..<(w - 1) {
-                let c = Double(gray[y * w + x])
-                let up = Double(gray[(y - 1) * w + x])
-                let down = Double(gray[(y + 1) * w + x])
-                let left = Double(gray[y * w + x - 1])
-                let right = Double(gray[y * w + x + 1])
-                let lap = abs(4.0 * c - up - down - left - right)
-                sum += lap
-                sumSq += lap * lap
+                let idx = y * w + x
+                let lap = abs(4 * stretched[idx] - stretched[idx - w] - stretched[idx + w]
+                              - stretched[idx - 1] - stretched[idx + 1])
+                let d = Double(lap)
+                s1 += d
+                s2 += d * d
                 count += 1
             }
         }
 
         guard count > 0 else { return nil }
-        let mean = sum / Double(count)
-        let variance = sumSq / Double(count) - mean * mean
-        return max(0, variance)
+        let mean = s1 / Double(count)
+        let variance = max(0, s2 / Double(count) - mean * mean)
+        return SharpnessDetail(lapVar: variance, contrast: contrast, meanLuma: meanLuma, lowDetail: false)
     }
 
     // MARK: - 灰度化

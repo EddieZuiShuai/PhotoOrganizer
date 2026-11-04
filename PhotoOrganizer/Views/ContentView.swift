@@ -328,6 +328,58 @@ struct ScanningView: View {
 
 // MARK: - 结果
 
+/// 列表布局：单列 / 两列 / 三列
+enum LayoutMode: Int, CaseIterable, Identifiable {
+    case list = 1
+    case two = 2
+    case three = 3
+
+    var id: Int { rawValue }
+    var columns: Int { rawValue }
+
+    var icon: String {
+        switch self {
+        case .list: return "list.bullet"
+        case .two: return "square.grid.2x2"
+        case .three: return "square.grid.3x3"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .list: return "单列"
+        case .two: return "两列"
+        case .three: return "三列"
+        }
+    }
+}
+
+/// 「这张其实挺清晰」的黑名单：用户手动否掉的，以后不再算模糊
+final class BlurIgnoreStore {
+    static let shared = BlurIgnoreStore()
+    private let key = "blurIgnoredIDs"
+    private let defaults = UserDefaults.standard
+
+    func all() -> Set<String> {
+        return Set(defaults.stringArray(forKey: key) ?? [])
+    }
+
+    func add(_ id: String) {
+        var list = defaults.stringArray(forKey: key) ?? []
+        if !list.contains(id) {
+            list.append(id)
+            if list.count > 5000 {
+                list.removeFirst(list.count - 5000)
+            }
+            defaults.set(list, forKey: key)
+        }
+    }
+
+    func removeAll() {
+        defaults.removeObject(forKey: key)
+    }
+}
+
 struct ResultView: View {
     let result: AnalysisResult
     let onRestart: () -> Void
@@ -336,6 +388,8 @@ struct ResultView: View {
     private let itemIndex: [String: PhotoItem]
     /// 按体积从大到小预排好，避免每次刷新都重排几万张
     private let sortedBySize: [PhotoItem]
+
+    private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
 
     @State private var tab: ResultTab = .suggested
     @State private var selectedIDs: Set<String> = []
@@ -363,6 +417,12 @@ struct ResultView: View {
     @State private var compressingID: String?
     @State private var confirmCompress: PhotoItem?
 
+    // 布局 / 模糊灵敏度 / 手动排除
+    @AppStorage("resultLayoutMode") private var layoutRaw: Int = 3
+    @AppStorage("blurSensitivity") private var blurLevel: Int = 1
+    @State private var ignoredBlurIDs: Set<String> = BlurIgnoreStore.shared.all()
+    @State private var lastLongPressAt: Date = .distantPast
+
     init(result: AnalysisResult, onRestart: @escaping () -> Void) {
         self.result = result
         self.onRestart = onRestart
@@ -377,18 +437,19 @@ struct ResultView: View {
             .sorted { $0.fileSize > $1.fileSize }
     }
 
+    private var layout: LayoutMode {
+        return LayoutMode(rawValue: layoutRaw) ?? .three
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
             chips
             filterBar
+            toolbar
 
             ScrollView {
-                LazyVStack(spacing: 10) {
-                    content
-                }
-                .padding(.horizontal, 16)
-                .padding(.bottom, 130)
+                scrollContent
             }
         }
         .overlay(alignment: .bottom) {
@@ -462,7 +523,7 @@ struct ResultView: View {
         .animation(.easeInOut(duration: 0.2), value: toast)
     }
 
-    // MARK: 数据
+    // MARK: - 数据
 
     private func passes(_ item: PhotoItem) -> Bool {
         guard period.contains(item.creationDate) else { return false }
@@ -490,8 +551,26 @@ struct ResultView: View {
         result.suggestedItems.filter { !deletedIDs.contains($0.id) && passes($0) }
     }
 
+    /// 模糊参考值：整个相册的中位清晰度。低于它的比例越小越可能是糊片。
+    private var blurReference: Double {
+        return max(1, result.blurReference)
+    }
+
+    /// 模糊列表：三档灵敏度，另外扣掉用户手动否掉的
     private var blurry: [PhotoItem] {
-        result.blurryItems.filter { !deletedIDs.contains($0.id) && passes($0) }
+        let level = min(max(blurLevel, 0), 2)
+        let caps = [110.0, 180.0, 290.0]
+        let limits = [0.30, 0.45, 0.68]
+        let cap = caps[level]
+        let limit = limits[level]
+        let ref = blurReference
+
+        return result.blurryItems.filter { item in
+            guard !deletedIDs.contains(item.id), passes(item) else { return false }
+            guard !ignoredBlurIDs.contains(item.id) else { return false }
+            guard let s = item.sharpness else { return false }
+            return s < cap && s / ref < limit
+        }
     }
 
     private var shots: [PhotoItem] {
@@ -546,6 +625,39 @@ struct ResultView: View {
         case .blurry: return blurry
         case .large: return largeItems
         case .content(let c): return contentItems(c)
+        }
+    }
+
+    private var isGroupTab: Bool {
+        return tab == .duplicate || tab == .similar
+    }
+
+    /// 当前标签下「按行/格子铺开」的照片（分组标签返回空）
+    private var flatItems: [PhotoItem] {
+        switch tab {
+        case .suggested: return suggested
+        case .blurry: return blurry
+        case .large: return largeItems
+        case .content(let c): return contentItems(c)
+        case .duplicate, .similar: return []
+        }
+    }
+
+    private var currentTag: String? {
+        switch tab {
+        case .blurry: return "模糊"
+        case .content(let c): return c.rawValue
+        default: return nil
+        }
+    }
+
+    private var emptyTextForCurrentTab: String {
+        switch tab {
+        case .suggested: return "没有需要特别提醒的照片"
+        case .blurry: return "这一档灵敏度下没有模糊照片"
+        case .large: return "没有找到大文件"
+        case .content: return "这一类没有照片"
+        default: return "没有内容"
         }
     }
 
@@ -607,7 +719,8 @@ struct ResultView: View {
                 Text(summaryLine)
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
-                Spacer()
+                    .lineLimit(1)
+                Spacer(minLength: 4)
                 headerButton(icon: "chart.pie.fill", text: "空间") { showDashboard = true }
                 headerButton(icon: "line.3.horizontal.decrease", text: "筛选") { showFilter = true }
                 headerButton(icon: "hand.draw.fill", text: "逐张过") { startTriage() }
@@ -652,7 +765,7 @@ struct ResultView: View {
                 Text(text)
                     .font(.system(size: 11, weight: .medium))
             }
-            .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
+            .foregroundColor(blue)
             .padding(.horizontal, 8)
             .padding(.vertical, 5)
             .background(Capsule().fill(Color.white))
@@ -678,10 +791,10 @@ struct ResultView: View {
                         .font(.system(size: 11, weight: .medium))
                 }
             }
-            .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
+            .foregroundColor(blue)
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
-            .background(Capsule().fill(Color(red: 0.18, green: 0.49, blue: 0.96).opacity(0.1)))
+            .background(Capsule().fill(blue.opacity(0.1)))
             .padding(.horizontal, 16)
             .padding(.top, 4)
         }
@@ -697,9 +810,9 @@ struct ResultView: View {
     }
 
     private var summaryLine: String {
-        var s = "共 \(result.photoCount) 张照片"
+        var s = "\(result.photoCount) 张照片"
         if result.videoCount > 0 {
-            s += " · \(result.videoCount) 个视频"
+            s += " · \(result.videoCount) 视频"
         }
         if !deletedIDs.isEmpty {
             s += " · 已删 \(deletedIDs.count)"
@@ -741,7 +854,7 @@ struct ResultView: View {
                         .background(
                             Capsule().fill(
                                 tab == item
-                                ? Color(red: 0.18, green: 0.49, blue: 0.96)
+                                ? blue
                                 : Color.white
                             )
                         )
@@ -754,163 +867,199 @@ struct ResultView: View {
         }
     }
 
-    // MARK: 列表
+    // MARK: 工具条（提示 + 全选 + 布局 + 模糊灵敏度）
 
-    @ViewBuilder
-    private var content: some View {
-        switch tab {
-        case .duplicate:
-            if dupGroups.isEmpty {
-                emptyHint("没有发现完全相同的照片", icon: "checkmark.circle")
-            } else {
-                ForEach(Array(dupGroups.enumerated()), id: \.element.id) { index, group in
-                    groupCard(group: group, index: index + 1)
-                }
-            }
-
-        case .similar:
-            if simGroups.isEmpty {
-                emptyHint("没有发现相似照片", icon: "checkmark.circle")
-            } else {
-                ForEach(Array(simGroups.enumerated()), id: \.element.id) { index, group in
-                    groupCard(group: group, index: index + 1)
-                }
-            }
-
-        case .suggested:
-            flatList(suggested, tag: nil, emptyText: "没有需要特别提醒的照片")
-
-        case .blurry:
-            flatList(blurry, tag: "模糊", emptyText: "没有发现模糊照片")
-
-        case .large:
-            largeList
-
-        case .content(let category):
-            flatList(contentItems(category), tag: category.rawValue, emptyText: "这一类没有照片")
-        }
-    }
-
-    @ViewBuilder
-    private var largeList: some View {
-        if largeItems.isEmpty {
-            emptyHint("没有找到大文件", icon: "checkmark.circle")
-        } else {
-            HStack {
-                Text("按体积从大到小 · 共 " + byteText(largeTotalBytes))
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                Spacer()
-                Button {
-                    selectedIDs.formUnion(largeItems.map { $0.id })
-                } label: {
-                    Text("全选本类 \(largeItems.count) 项")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
-                }
-            }
-            .padding(.vertical, 2)
-
-            ForEach(largeItems) { item in
-                largeRow(item)
-            }
-        }
-    }
-
-    private func largeRow(_ item: PhotoItem) -> some View {
-        HStack(spacing: 12) {
-            SelectableThumb(
-                item: item,
-                isSelected: selectedIDs.contains(item.id),
-                size: 66,
-                onOpen: { open(item, in: largeItems) },
-                onToggle: { toggle(item.id) }
-            )
-
-            VStack(alignment: .leading, spacing: 4) {
-                HStack(spacing: 6) {
-                    Text(byteText(item.fileSize))
-                        .font(.system(size: 16, weight: .semibold))
-                    if item.isVideo {
-                        Text("视频")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 6)
-                            .padding(.vertical, 2)
-                            .background(Capsule().fill(Color(red: 0.3, green: 0.45, blue: 0.85)))
-                    }
-                }
-                Text(item.displayName)
+    private var toolbar: some View {
+        VStack(spacing: 5) {
+            HStack(spacing: 8) {
+                Text(selectedIDs.isEmpty
+                     ? "点一下选中 · 长按放大"
+                     : "已选 \(selectedIDs.count) 张 · 再点取消")
                     .font(.system(size: 11))
-                    .foregroundColor(.secondary)
-                Text(subLine(item))
-                    .font(.system(size: 10))
-                    .foregroundColor(.secondary)
+                    .foregroundColor(selectedIDs.isEmpty ? .secondary : .red)
+                    .lineLimit(1)
+
+                Spacer(minLength: 4)
+
+                if !isGroupTab && !flatItems.isEmpty {
+                    Button {
+                        toggleSelectAll(flatItems)
+                    } label: {
+                        Text(allSelected(flatItems) ? "取消全选" : "全选 \(flatItems.count)")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(blue)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(blue.opacity(0.1)))
+                    }
+                    .buttonStyle(.plain)
+                }
+
+                if !isGroupTab {
+                    layoutButtons
+                }
             }
 
-            Spacer()
+            if tab == .blurry {
+                blurLevelBar
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.top, 2)
+        .padding(.bottom, 5)
+    }
 
-            if item.isVideo {
+    private var layoutButtons: some View {
+        HStack(spacing: 2) {
+            ForEach(LayoutMode.allCases) { mode in
                 Button {
-                    confirmCompress = item
+                    layoutRaw = mode.rawValue
                 } label: {
-                    Text("压到 720p")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
-                        .padding(.horizontal, 10)
-                        .padding(.vertical, 7)
-                        .background(Capsule().fill(Color(red: 0.18, green: 0.49, blue: 0.96).opacity(0.12)))
+                    Image(systemName: mode.icon)
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(layoutRaw == mode.rawValue ? .white : .secondary)
+                        .frame(width: 27, height: 22)
+                        .background(
+                            RoundedRectangle(cornerRadius: 5)
+                                .fill(layoutRaw == mode.rawValue ? blue : Color.black.opacity(0.05))
+                        )
                 }
                 .buttonStyle(.plain)
-                .disabled(compressingID != nil)
+                .accessibilityLabel(mode.title)
             }
         }
-        .padding(10)
-        .background(Color.white)
-        .cornerRadius(12)
+        .padding(2)
+        .background(RoundedRectangle(cornerRadius: 7).fill(Color.white))
     }
 
-    private func subLine(_ item: PhotoItem) -> String {
-        if item.isVideo {
-            let d = durationText(item)
-            return d.isEmpty ? item.resolutionText : item.resolutionText + " · " + d
+    private var blurLevelBar: some View {
+        HStack(spacing: 6) {
+            Text("模糊判定")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+
+            HStack(spacing: 2) {
+                ForEach(0..<3, id: \.self) { i in
+                    Button {
+                        blurLevel = i
+                    } label: {
+                        Text(["宽松", "标准", "严格"][i])
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(blurLevel == i ? .white : .secondary)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule().fill(blurLevel == i ? blue : Color.black.opacity(0.05))
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Spacer(minLength: 4)
+
+            if !ignoredBlurIDs.isEmpty {
+                Button {
+                    BlurIgnoreStore.shared.removeAll()
+                    ignoredBlurIDs = []
+                    showToast("已恢复被排除的照片")
+                } label: {
+                    Text("恢复 \(ignoredBlurIDs.count) 张")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            } else {
+                Text("\(blurry.count) 张")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
         }
-        return item.sizeText.isEmpty ? item.resolutionText : item.resolutionText + " · " + item.sizeText
     }
 
-    private func durationText(_ item: PhotoItem) -> String {
-        let d = Int(item.asset.duration.rounded())
-        if d <= 0 { return "" }
-        if d >= 3600 {
-            return String(format: "%d:%02d:%02d", d / 3600, (d % 3600) / 60, d % 60)
-        }
-        return String(format: "%d:%02d", d / 60, d % 60)
+    // MARK: 列表
+
+    private var gridColumns: [GridItem] {
+        return Array(repeating: GridItem(.fixed(cellSide), spacing: 6), count: layout.columns)
+    }
+
+    /// 格子边长：用屏幕宽度算死，避免 aspectRatio 在 LazyVGrid 里高度塌成 0
+    private var cellSide: CGFloat {
+        let w = UIScreen.main.bounds.width
+        let n = CGFloat(max(1, layout.columns))
+        let padding: CGFloat = 24 + (n - 1) * 6
+        return max(60, (w - padding) / n)
     }
 
     @ViewBuilder
-    private func flatList(_ list: [PhotoItem], tag: String?, emptyText: String) -> some View {
-        if list.isEmpty {
-            emptyHint(emptyText, icon: "checkmark.circle")
-        } else {
-            HStack {
-                Text(tag == nil ? "按可能性从高到低排序" : "共 \(list.count) 张")
-                    .font(.system(size: 12))
-                    .foregroundColor(.secondary)
-                Spacer()
-                Button {
-                    selectedIDs.formUnion(list.map { $0.id })
-                } label: {
-                    Text("全选本类 \(list.count) 张")
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
+    private var scrollContent: some View {
+        if isGroupTab {
+            LazyVStack(spacing: 10) {
+                if tab == .duplicate {
+                    if dupGroups.isEmpty {
+                        emptyHint("没有发现完全相同的照片", icon: "checkmark.circle")
+                    } else {
+                        ForEach(Array(dupGroups.enumerated()), id: \.element.id) { index, group in
+                            groupCard(group: group, index: index + 1)
+                        }
+                    }
+                } else {
+                    if simGroups.isEmpty {
+                        emptyHint("没有发现相似照片", icon: "checkmark.circle")
+                    } else {
+                        ForEach(Array(simGroups.enumerated()), id: \.element.id) { index, group in
+                            groupCard(group: group, index: index + 1)
+                        }
+                    }
                 }
             }
-            .padding(.vertical, 2)
+            .padding(.horizontal, 16)
+            .padding(.top, 4)
+            .padding(.bottom, 140)
+
+        } else if flatItems.isEmpty {
+            emptyHint(emptyTextForCurrentTab, icon: "checkmark.circle")
+                .padding(.top, 30)
+
+        } else if layout == .list {
+            flatListBody(flatItems)
+
+        } else {
+            gridBody(flatItems)
+        }
+    }
+
+    /// 列表：一次算好数组再往下传，避免每一行都重新过滤几万张
+    private func flatListBody(_ list: [PhotoItem]) -> some View {
+        return LazyVStack(spacing: 8) {
+            if tab == .large {
+                HStack {
+                    Text("按体积从大到小 · 共 " + byteText(largeTotalBytes))
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Spacer()
+                }
+                .padding(.horizontal, 2)
+            }
 
             ForEach(list) { item in
-                itemRow(item, tag: tag)
+                itemRow(item, tag: currentTag, list: list)
             }
         }
+        .padding(.horizontal, 16)
+        .padding(.top, 4)
+        .padding(.bottom, 140)
+    }
+
+    private func gridBody(_ list: [PhotoItem]) -> some View {
+        return LazyVGrid(columns: gridColumns, spacing: 6) {
+            ForEach(list) { item in
+                gridCell(item, tag: currentTag, list: list)
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.top, 4)
+        .padding(.bottom, 140)
     }
 
     private func emptyHint(_ text: String, icon: String) -> some View {
@@ -921,10 +1070,20 @@ struct ResultView: View {
             Text(text)
                 .font(.system(size: 14))
                 .foregroundColor(.secondary)
+            if tab == .blurry {
+                Text("觉得判得不准，就切上面的「宽松」，或者点「算清晰」把某张排除掉")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 40)
+                    .padding(.top, 2)
+            }
         }
         .frame(maxWidth: .infinity)
-        .padding(.vertical, 60)
+        .padding(.vertical, 50)
     }
+
+    // MARK: 分组卡片（重复 / 相似）
 
     private func groupCard(group: PhotoGroup, index: Int) -> some View {
         VStack(alignment: .leading, spacing: 10) {
@@ -945,11 +1104,11 @@ struct ResultView: View {
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
-                    ForEach(Array(group.items.enumerated()), id: \.element.id) { idx, item in
+                    ForEach(group.items) { item in
                         SelectableThumb(
                             item: item,
                             isSelected: selectedIDs.contains(item.id),
-                            size: 80,
+                            size: 96,
                             onOpen: { open(item, in: group.items) },
                             onToggle: { toggle(item.id) }
                         )
@@ -981,21 +1140,20 @@ struct ResultView: View {
         .cornerRadius(12)
     }
 
-    private func itemRow(_ item: PhotoItem, tag: String?) -> some View {
+    // MARK: 单行（列表布局）
+
+    private func itemRow(_ item: PhotoItem, tag: String?, list: [PhotoItem]) -> some View {
+        let selected = selectedIDs.contains(item.id)
         let detail = tagText(item)
+
         return HStack(spacing: 12) {
-            SelectableThumb(
-                item: item,
-                isSelected: selectedIDs.contains(item.id),
-                size: 66,
-                onOpen: { open(item, in: currentList()) },
-                onToggle: { toggle(item.id) }
-            )
+            thumb(item, size: 78, selected: selected)
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
                     Text(item.displayName)
                         .font(.system(size: 14, weight: .medium))
+                        .lineLimit(1)
 
                     if item.cleanupScore >= 0.5 {
                         Text("\(item.scorePercent)%")
@@ -1007,7 +1165,11 @@ struct ResultView: View {
                     }
                 }
 
-                if !item.cleanupReasons.isEmpty {
+                if tab == .blurry {
+                    Text("清晰度 \(Int(item.sharpnessScore.rounded())) / 100")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                } else if !item.cleanupReasons.isEmpty {
                     Text(item.cleanupReasons.prefix(2).joined(separator: " · "))
                         .font(.system(size: 11))
                         .foregroundColor(.secondary)
@@ -1019,6 +1181,10 @@ struct ResultView: View {
                             Text("·")
                             Text(item.sizeText)
                         }
+                        if item.isVideo && !durationText(item).isEmpty {
+                            Text("·")
+                            Text(durationText(item))
+                        }
                     }
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
@@ -1027,14 +1193,26 @@ struct ResultView: View {
                 if !detail.isEmpty {
                     Text(detail)
                         .font(.system(size: 10))
-                        .foregroundColor(Color(red: 0.18, green: 0.49, blue: 0.96))
+                        .foregroundColor(blue)
                         .lineLimit(1)
                 }
             }
 
-            Spacer()
+            Spacer(minLength: 4)
 
-            if let tag = tag {
+            if tab == .blurry {
+                Button {
+                    ignoreBlur(item)
+                } label: {
+                    Text("算清晰")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(Color(red: 0.15, green: 0.55, blue: 0.35))
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(Color(red: 0.15, green: 0.55, blue: 0.35).opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+            } else if let tag = tag {
                 Text(tag)
                     .font(.system(size: 11))
                     .foregroundColor(.white)
@@ -1043,10 +1221,203 @@ struct ResultView: View {
                     .background(tag == "模糊" ? Color.orange : Color.gray)
                     .cornerRadius(6)
             }
+
+            if tab == .large && item.isVideo {
+                Button {
+                    confirmCompress = item
+                } label: {
+                    Text("720p")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(blue)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 5)
+                        .background(Capsule().fill(blue.opacity(0.12)))
+                }
+                .buttonStyle(.plain)
+                .disabled(compressingID != nil)
+            }
+
+            previewButton(item, in: list)
         }
         .padding(10)
         .background(Color.white)
         .cornerRadius(12)
+        .overlay(
+            RoundedRectangle(cornerRadius: 12)
+                .stroke(selected ? blue.opacity(0.55) : Color.clear, lineWidth: 1.5)
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 12))
+        .onTapGesture { tapRow(item) }
+        .onLongPressGesture(minimumDuration: 0.35) {
+            lastLongPressAt = Date()
+            open(item, in: list)
+        }
+    }
+
+    // MARK: 单格（两列 / 三列布局）
+
+    private func gridCell(_ item: PhotoItem, tag: String?, list: [PhotoItem]) -> some View {
+        let selected = selectedIDs.contains(item.id)
+
+        return ZStack {
+            PhotoThumbView(asset: item.asset)
+
+            VStack(spacing: 0) {
+                Spacer(minLength: 0)
+                HStack(alignment: .bottom, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(shortDate(item))
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundColor(.white)
+                            .lineLimit(1)
+                        Text(cellExtra(item))
+                            .font(.system(size: 9))
+                            .foregroundColor(.white.opacity(0.82))
+                            .lineLimit(1)
+                    }
+                    Spacer(minLength: 0)
+                }
+                .padding(.horizontal, 5)
+                .padding(.top, 12)
+                .padding(.bottom, 4)
+                .background(
+                    LinearGradient(
+                        colors: [Color.black.opacity(0.0), Color.black.opacity(0.62)],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+            }
+
+            if selected {
+                blue.opacity(0.30)
+            }
+        }
+        .frame(width: cellSide, height: cellSide)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(selected ? Color.white : Color.clear, lineWidth: 2.5)
+        )
+        .overlay(alignment: .topLeading) {
+            if let tag = tag {
+                Text(tag)
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(tag == "模糊" ? Color.orange : Color.gray.opacity(0.85)))
+                    .padding(5)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if tab == .large && item.isVideo {
+                Button {
+                    confirmCompress = item
+                } label: {
+                    Text("720p")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 5)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(blue.opacity(0.9)))
+                }
+                .buttonStyle(.plain)
+                .padding(4)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if selected {
+                checkBadge
+                    .padding(5)
+            }
+        }
+        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onTapGesture { tapRow(item) }
+        .onLongPressGesture(minimumDuration: 0.35) {
+            lastLongPressAt = Date()
+            open(item, in: list)
+        }
+    }
+
+    /// 方形缩略图 + 选中态（蓝底 + 白框 + 右下角勾）
+    private func thumb(_ item: PhotoItem, size: CGFloat, selected: Bool) -> some View {
+        ZStack(alignment: .bottomTrailing) {
+            PhotoThumbView(asset: item.asset, size: size)
+
+            if selected {
+                Rectangle()
+                    .fill(blue.opacity(0.30))
+                    .frame(width: size, height: size)
+                checkBadge
+                    .padding(4)
+            }
+        }
+        .frame(width: size, height: size)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(selected ? blue : Color.clear, lineWidth: 2.5)
+        )
+        .cornerRadius(8)
+    }
+
+    private var checkBadge: some View {
+        ZStack {
+            Circle()
+                .fill(blue)
+                .frame(width: 19, height: 19)
+            Circle()
+                .stroke(Color.white, lineWidth: 1.5)
+                .frame(width: 19, height: 19)
+            Image(systemName: "checkmark")
+                .font(.system(size: 10, weight: .bold))
+                .foregroundColor(.white)
+        }
+    }
+
+    private func previewButton(_ item: PhotoItem, in list: [PhotoItem]) -> some View {
+        Button {
+            open(item, in: list)
+        } label: {
+            Image(systemName: "arrow.up.left.and.arrow.down.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundColor(.secondary)
+                .frame(width: 30, height: 30)
+                .background(Circle().fill(Color.black.opacity(0.05)))
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func shortDate(_ item: PhotoItem) -> String {
+        let f = DateFormatter()
+        f.dateFormat = "MM-dd HH:mm"
+        return f.string(from: item.creationDate ?? Date(timeIntervalSince1970: 0))
+    }
+
+    private func cellExtra(_ item: PhotoItem) -> String {
+        if tab == .blurry {
+            return "清晰度 " + String(Int(item.sharpnessScore.rounded()))
+        }
+        if item.isVideo {
+            let d = durationText(item)
+            if item.sizeText.isEmpty {
+                return d.isEmpty ? "视频" : d
+            }
+            return d.isEmpty ? item.sizeText : item.sizeText + " · " + d
+        }
+        if !item.sizeText.isEmpty {
+            return item.sizeText
+        }
+        return item.resolutionText
+    }
+
+    private func durationText(_ item: PhotoItem) -> String {
+        let d = Int(item.asset.duration.rounded())
+        if d <= 0 { return "" }
+        if d >= 3600 {
+            return String(format: "%d:%02d:%02d", d / 3600, (d % 3600) / 60, d % 60)
+        }
+        return String(format: "%d:%02d", d / 60, d % 60)
     }
 
     private func tagText(_ item: PhotoItem) -> String {
@@ -1104,7 +1475,7 @@ struct ResultView: View {
                             .foregroundColor(.white)
                             .frame(maxWidth: .infinity)
                             .padding(.vertical, 13)
-                            .background(Color(red: 0.18, green: 0.49, blue: 0.96))
+                            .background(blue)
                             .cornerRadius(10)
                     }
                 }
@@ -1143,12 +1514,41 @@ struct ResultView: View {
 
     // MARK: 行为
 
+    private func tapRow(_ item: PhotoItem) {
+        // 长按刚结束时的这次「抬手」不当作点选，避免长按看大图回来发现被勾上了
+        if Date().timeIntervalSince(lastLongPressAt) < 0.6 { return }
+        toggle(item.id)
+    }
+
     private func toggle(_ id: String) {
         if selectedIDs.contains(id) {
             selectedIDs.remove(id)
         } else {
             selectedIDs.insert(id)
         }
+    }
+
+    private func allSelected(_ list: [PhotoItem]) -> Bool {
+        guard !list.isEmpty else { return false }
+        return Set(list.map { $0.id }).isSubset(of: selectedIDs)
+    }
+
+    private func toggleSelectAll(_ list: [PhotoItem]) {
+        let ids = Set(list.map { $0.id })
+        if ids.isSubset(of: selectedIDs) {
+            selectedIDs.subtract(ids)
+            showToast("已取消本类选中")
+        } else {
+            selectedIDs.formUnion(ids)
+            showToast("已选中本类 \(ids.count) 张")
+        }
+    }
+
+    private func ignoreBlur(_ item: PhotoItem) {
+        BlurIgnoreStore.shared.add(item.id)
+        ignoredBlurIDs.insert(item.id)
+        selectedIDs.remove(item.id)
+        showToast("这张不再算模糊，可在上方「恢复」里找回")
     }
 
     private func open(_ item: PhotoItem, in list: [PhotoItem]) {
@@ -1354,42 +1754,44 @@ struct ResultView: View {
     }
 }
 
-// MARK: - 可勾选的缩略图
+// MARK: - 分组里的可勾选缩略图
 
 struct SelectableThumb: View {
     let item: PhotoItem
     let isSelected: Bool
-    var size: CGFloat = 76
+    var size: CGFloat = 96
     let onOpen: () -> Void
     let onToggle: () -> Void
 
-    var body: some View {
-        ZStack(alignment: .topTrailing) {
-            Button(action: onOpen) {
-                PhotoThumbView(asset: item.asset, size: size)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 8)
-                            .stroke(isSelected ? Color.red : Color.clear, lineWidth: 2.5)
-                    )
-            }
-            .buttonStyle(.plain)
+    private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
 
-            Button(action: onToggle) {
+    var body: some View {
+        ZStack(alignment: .bottomTrailing) {
+            PhotoThumbView(asset: item.asset, size: size)
+
+            if isSelected {
+                Rectangle()
+                    .fill(blue.opacity(0.30))
+                    .frame(width: size, height: size)
                 ZStack {
-                    Circle()
-                        .fill(isSelected ? Color.red : Color.black.opacity(0.35))
-                        .frame(width: 22, height: 22)
-                    if isSelected {
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundColor(.white)
-                    }
+                    Circle().fill(blue).frame(width: 19, height: 19)
+                    Circle().stroke(Color.white, lineWidth: 1.5).frame(width: 19, height: 19)
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 10, weight: .bold))
+                        .foregroundColor(.white)
                 }
+                .padding(4)
             }
-            .buttonStyle(.plain)
-            .padding(4)
         }
         .frame(width: size, height: size)
+        .overlay(
+            RoundedRectangle(cornerRadius: 8)
+                .stroke(isSelected ? blue : Color.clear, lineWidth: 2.5)
+        )
+        .cornerRadius(8)
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onTapGesture(perform: onToggle)
+        .onLongPressGesture(minimumDuration: 0.35, perform: onOpen)
     }
 }
 
@@ -1397,30 +1799,30 @@ struct SelectableThumb: View {
 
 struct PhotoThumbView: View {
     let asset: PHAsset
-    var size: CGFloat = 72
+    /// nil 表示铺满父容器（网格用）
+    var size: CGFloat? = nil
 
     @State private var image: UIImage?
 
     var body: some View {
-        Group {
-            if let image = image {
-                Image(uiImage: image)
-                    .resizable()
-                    .scaledToFill()
-            } else {
-                Rectangle()
-                    .fill(Color.black.opacity(0.06))
-                    .overlay(
+        Color.black.opacity(0.06)
+            .overlay(
+                Group {
+                    if let image = image {
+                        Image(uiImage: image)
+                            .resizable()
+                            .scaledToFill()
+                    } else {
                         Image(systemName: "photo")
                             .font(.system(size: 16))
                             .foregroundColor(.secondary)
-                    )
-            }
-        }
-        .frame(width: size, height: size)
-        .clipped()
-        .cornerRadius(8)
-        .onAppear(perform: load)
+                    }
+                }
+            )
+            .frame(width: size, height: size)
+            .clipped()
+            .cornerRadius(size == nil ? 0 : 8)
+            .onAppear(perform: load)
     }
 
     private func load() {
