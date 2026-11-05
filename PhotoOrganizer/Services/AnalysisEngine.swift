@@ -37,8 +37,16 @@ final class AnalysisEngine {
             var items: [PhotoItem] = []
             items.reserveCapacity(total)
 
-            // 照片特别多时（>2 万张）跳过 OCR，否则扫一次要太久
-            let doContent = total <= 20000
+            // 内容识别分两段，代价差很远：
+            //  - 分类（VNClassifyImageRequest）便宜，全库都跑；
+            //  - OCR 贵得多，所以给整库一个总次数预算，用完就只分类、不读字。
+            // 旧写法是「总资产 > 2 万就整段跳过内容识别」，结果 21478 张照片的库
+            // 连分类都没做：发票恒为 0、内容分类全落进「其他」，界面上还看不出原因。
+            let ocrBudget = 4000
+            var ocrUsed = 0
+            // 细节 OCR：只对「看起来像纸/票」的照片重取 1024px 再读一次，单独给预算
+            let detailOCRBudget = 1500
+            var detailOCRUsed = 0
 
             // 1) 逐张提取特征 + 内容识别（一次缩略图，算四样东西）
             for (index, asset) in assets.enumerated() {
@@ -73,15 +81,34 @@ final class AnalysisEngine {
                         item.brightness = st.brightness
                         item.edgeDensity = st.edgeDensity
 
-                        if doContent {
-                            let content = ContentAnalyzer.shared.analyze(
-                                image: thumb,
-                                isScreenshot: item.isScreenshot
-                            )
-                            item.category = content.category
-                            item.contentTags = content.tags
-                            item.ocrHits = content.ocrHits
-                            item.faceCount = content.faceCount
+                        let allowOCR = ocrUsed < ocrBudget
+                        let content = ContentAnalyzer.shared.analyze(
+                            image: thumb,
+                            isScreenshot: item.isScreenshot,
+                            allowOCR: allowOCR
+                        )
+                        if content.ranOCR { ocrUsed += 1 }
+                        item.category = content.category
+                        item.contentTags = content.tags
+                        item.ocrHits = content.ocrHits
+                        item.faceCount = content.faceCount
+
+                        // 320px 的图上，发票的字只有 3~6 像素高，读不出来。
+                        // 所以「看起来像纸/票」，或者「明明读到了字但没命中关键词」的照片，
+                        // 重取一张约 1024px 的图再读一次——这是「发票恒为 0」的正解。
+                        // 两个条件都刻意收紧，再加一个总量上限，避免整库多读一遍大图。
+                        let wantsDetail = content.documentLike || content.textLength >= 12
+                        if wantsDetail && !item.isScreenshot && detailOCRUsed < detailOCRBudget {
+                            if let big = library.imageForOCR(for: asset, maxPixel: 1024) {
+                                detailOCRUsed += 1
+                                let detail = ContentAnalyzer.shared.ocrOnly(image: big)
+                                if !detail.receiptHits.isEmpty {
+                                    item.category = .receipt
+                                    item.ocrHits = Array(detail.receiptHits.prefix(4))
+                                } else if detail.docKeywordHit && item.category == .other {
+                                    item.category = .document
+                                }
+                            }
                         }
                     }
                 }
@@ -226,7 +253,19 @@ final class AnalysisEngine {
             }
 
             // 低信息量：黑屏 / 纯白 / 纯色
-            if item.brightness >= 0 {
+            //
+            // 截图必须单独走一条：深色模式的截图天生接近全黑，它不是「误拍 / 挡住了镜头」。
+            // 旧的写法让一张黑截图同时吃到 0.7（挡住镜头）+ 0.45（系统截图），直接顶到 100%，
+            // 理由还自相矛盾——截图不可能是挡镜头拍出来的。现在只给一条诚实的理由。
+            if item.isScreenshot {
+                if item.brightness >= 0 && item.brightness < 0.05 {
+                    add(item.id, 0.55, "暗色截图，几乎全黑，内容很少")
+                } else if item.brightness > 0.97 && item.edgeDensity < 0.012 {
+                    add(item.id, 0.55, "截图几乎全是纯色，没什么内容")
+                } else {
+                    add(item.id, 0.45, "系统截图")
+                }
+            } else if item.brightness >= 0 {
                 if item.brightness < 0.05 {
                     add(item.id, 0.7, "接近全黑，像是误拍或挡住了镜头")
                 } else if item.brightness > 0.97 {
@@ -234,11 +273,6 @@ final class AnalysisEngine {
                 } else if item.edgeDensity < 0.012 {
                     add(item.id, 0.5, "画面几乎没有细节，像纯色图")
                 }
-            }
-
-            // 截图
-            if item.isScreenshot {
-                add(item.id, 0.45, "系统截图")
             }
 
             // 网图 / 表情包

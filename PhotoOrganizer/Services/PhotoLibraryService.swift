@@ -77,6 +77,32 @@ final class PhotoLibraryService {
         return thumbnail(for: asset, maxPixel: 320)
     }
 
+    /// 给 OCR 用的清晰大图（同步、高质量、精确缩放）。
+    ///
+    /// 不能直接用 thumbnail()：那个走 .fastFormat，拿到的是「快速降级图」，
+    /// 把它放大到 1024 只是把一张糊图放大，字照样读不出来。
+    /// 同理不碰 iCloud：为了补读文字去下载上千张原图，代价太大，读不到就算了。
+    func imageForOCR(for asset: PHAsset, maxPixel: CGFloat = 1024) -> UIImage? {
+        let options = PHImageRequestOptions()
+        options.isSynchronous = true
+        options.deliveryMode = .highQualityFormat
+        options.resizeMode = .exact
+        options.isNetworkAccessAllowed = false
+
+        var output: UIImage?
+        PHImageManager.default().requestImage(
+            for: asset,
+            targetSize: CGSize(width: maxPixel, height: maxPixel),
+            contentMode: .aspectFit,
+            options: options
+        ) { image, _ in
+            if let image = image {
+                output = image
+            }
+        }
+        return output
+    }
+
     /// 详情页用的大图（异步，允许从 iCloud 下载）
     func loadImage(for asset: PHAsset, targetSize: CGSize, completion: @escaping (UIImage?) -> Void) {
         let options = PHImageRequestOptions()

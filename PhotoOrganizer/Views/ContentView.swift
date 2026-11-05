@@ -412,6 +412,26 @@ struct ResultView: View {
     @State private var message: String?
     @State private var toast: String?
 
+    /// 一次选中太多张时先问一句。
+    /// 起因：建议清理页右上角点一下「全选 2779」，底部按钮立刻变成「删除 2779 张」，
+    /// 中间没有任何缓冲；而建议里本来就混着误判，点错的代价太大。
+    @State private var bulkConfirm: BulkConfirm?
+    /// 超过这个数量才拦。几十张的批量操作不值得多弹一次框。
+    private let bulkConfirmThreshold = 500
+
+    /// 批量操作的二次确认
+    private enum BulkConfirm: Identifiable {
+        case select(ids: Set<String>)
+        case delete
+
+        var id: String {
+            switch self {
+            case .select(let ids): return "select-\(ids.count)"
+            case .delete: return "delete"
+            }
+        }
+    }
+
     // 筛选（时间段 / 相册）
     @State private var period: TimeWindow = .all
     @State private var albumChoice: AlbumOption?
@@ -460,6 +480,35 @@ struct ResultView: View {
 
             ScrollView {
                 scrollContent
+            }
+            // 挂在 ScrollView 上而不是外层链路上：外层已经有一个「压缩确认」，
+            // 两个 confirmationDialog 叠在同一个视图上容易只生效一个。
+            .confirmationDialog(
+                bulkConfirmTitle,
+                isPresented: Binding(
+                    get: { bulkConfirm != nil },
+                    set: { if !$0 { bulkConfirm = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                if let pending = bulkConfirm {
+                    switch pending {
+                    case .select(let ids):
+                        Button("选中这 \(ids.count) 张") {
+                            selectedIDs.formUnion(ids)
+                            showToast("已选中 \(ids.count) 张")
+                            bulkConfirm = nil
+                        }
+                    case .delete:
+                        Button("删除 \(selectedIDs.count) 张", role: .destructive) {
+                            reallyDelete()
+                            bulkConfirm = nil
+                        }
+                    }
+                }
+                Button("取消", role: .cancel) { bulkConfirm = nil }
+            } message: {
+                Text(bulkConfirmMessage)
             }
         }
         .overlay(alignment: .bottom) {
@@ -531,6 +580,29 @@ struct ResultView: View {
         }
         .onAppear(perform: loadAlbums)
         .animation(.easeInOut(duration: 0.2), value: toast)
+    }
+
+    // MARK: - 批量确认
+
+    private var bulkConfirmTitle: String {
+        guard let pending = bulkConfirm else { return "" }
+        switch pending {
+        case .select(let ids):
+            return "一次选中 \(ids.count) 张？"
+        case .delete:
+            return "删除 \(selectedIDs.count) 张照片？"
+        }
+    }
+
+    private var bulkConfirmMessage: String {
+        guard let pending = bulkConfirm else { return "" }
+        switch pending {
+        case .select(let ids):
+            let total = selectedIDs.union(ids).count
+            return "选中的照片马上会进入待删除状态，底部红色按钮会变成「删除 \(total) 张」。建议先翻一眼再决定。"
+        case .delete:
+            return "会一次性删掉 \(selectedIDs.count) 张，删掉的照片在「最近删除」里可以放 30 天。"
+        }
     }
 
     // MARK: - 数据
@@ -1129,7 +1201,7 @@ struct ResultView: View {
 
             HStack {
                 Button {
-                    selectedIDs.formUnion(group.items.dropFirst().map { $0.id })
+                    selectMany(Set(group.items.dropFirst().map { $0.id }))
                 } label: {
                     Text("选中其余 \(group.items.count - 1) 张")
                         .font(.system(size: 12, weight: .medium))
@@ -1553,9 +1625,20 @@ struct ResultView: View {
         if ids.isSubset(of: selectedIDs) {
             selectedIDs.subtract(ids)
             showToast("已取消本类选中")
+            return
+        }
+        selectMany(ids)
+    }
+
+    /// 批量选中的统一入口：数量超过阈值就先确认一次，不直接落进 selectedIDs。
+    private func selectMany(_ ids: Set<String>) {
+        let adding = ids.subtracting(selectedIDs)
+        guard !adding.isEmpty else { return }
+        if adding.count > bulkConfirmThreshold {
+            bulkConfirm = .select(ids: adding)
         } else {
-            selectedIDs.formUnion(ids)
-            showToast("已选中本类 \(ids.count) 张")
+            selectedIDs.formUnion(adding)
+            showToast("已选中 \(adding.count) 张")
         }
     }
 
@@ -1575,7 +1658,18 @@ struct ResultView: View {
 
     /// 一步删除：点一下直接调系统删除，只剩 iOS 自己那一次确认。
     /// 选中的照片可以来自不同分类 / 不同筛选，统一按 id 还原成真实对象再删。
+    /// 但「一次删几百上千张」不再一步到底：先让用户确认一遍，再交给 iOS 确认。
     private func performDelete() {
+        guard !selectedIDs.isEmpty else { return }
+        if selectedIDs.count > bulkConfirmThreshold {
+            bulkConfirm = .delete
+            return
+        }
+        reallyDelete()
+    }
+
+    /// 真正执行删除（二次确认之后走这里）
+    private func reallyDelete() {
         var chosen: [PhotoItem] = []
         for id in selectedIDs {
             if let item = itemIndex[id] {
