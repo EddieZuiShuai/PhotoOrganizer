@@ -138,6 +138,21 @@ jobs:
           print('-> 首页按钮「开始扫描」在不在层级里：', any('开始扫描' in t for t, _ in out))
           PY
 
+          echo "== 缩略图自检（-PODiag）=="
+          xcrun simctl terminate "$UDID" com.eddie.photoorganizer 2>/dev/null || true
+          xcrun simctl launch "$UDID" com.eddie.photoorganizer -PODiag || true
+          sleep 12
+          CONT=$(xcrun simctl get_app_container "$UDID" com.eddie.photoorganizer data 2>/dev/null || true)
+          echo "容器：$CONT"
+          if [ -n "$CONT" ] && [ -f "$CONT/Documents/po-diag.txt" ]; then
+            cp "$CONT/Documents/po-diag.txt" build/preflight/po-diag.txt
+            echo "--------------------"
+            cat build/preflight/po-diag.txt
+            echo "--------------------"
+          else
+            echo "没生成 po-diag.txt（自检没跑起来）"
+          fi
+
       - name: 跑 UI 用例
         id: test
         run: |

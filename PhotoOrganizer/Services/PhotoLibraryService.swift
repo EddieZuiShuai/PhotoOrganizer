@@ -202,3 +202,100 @@ final class PhotoLibraryService {
         })
     }
 }
+
+#if DEBUG
+// MARK: - 只在 CI 里跑的自检
+//
+// 起因：云端模拟器上「18 张照片 / 占用 13.1 MB」都正常，但建议清理、重复、相似、模糊
+// 全是 0，占用分布里 18 张也全归「其他」。而 AnalysisEngine 里 dHash、清晰度、内容分类
+// 全部包在 `if let thumb = library.thumbnail(for:maxPixel:)` 里面 —— 缩略图取不到，
+// 后面所有特征就都是默认值，整个结果页看起来「一片干净」。
+//
+// 用启动参数 `-PODiag` 触发，把每种请求方式的真实回调写进 Documents/po-diag.txt。
+// 正常启动完全不会执行，Release 包里这段代码根本不存在。
+enum DebugSelfCheck {
+
+    static func runIfRequested() {
+        guard ProcessInfo.processInfo.arguments.contains("-PODiag") else { return }
+        DispatchQueue.global(qos: .utility).async {
+            var lines: [String] = []
+
+            let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+            lines.append("authorization(\(status.rawValue)) " + describe(status))
+
+            let assets = PhotoLibraryService.shared.fetchAllAssets()
+            lines.append("assets=\(assets.count)")
+
+            let sample = Array(assets.prefix(4))
+            if sample.isEmpty {
+                lines.append("相册为空，没什么可测")
+                write(lines)
+                return
+            }
+
+            for (i, asset) in sample.enumerated() {
+                lines.append("--- [\(i)] \(asset.pixelWidth)x\(asset.pixelHeight) "
+                             + "size=\(PhotoLibraryService.shared.fileSize(of: asset))")
+                lines.append("    fastFormat        : " + probe(asset, .fastFormat, network: false))
+                lines.append("    highQualityFormat : " + probe(asset, .highQualityFormat, network: false))
+                lines.append("    opportunistic     : " + probe(asset, .opportunistic, network: false))
+                lines.append("    highQuality+net   : " + probe(asset, .highQualityFormat, network: true))
+                lines.append("    引擎实际用的那一个 : "
+                             + (PhotoLibraryService.shared.thumbnail(for: asset, maxPixel: 320) == nil
+                                ? "nil  <- 取不到" : "有图"))
+            }
+
+            write(lines)
+        }
+    }
+
+    private static func describe(_ s: PHAuthorizationStatus) -> String {
+        switch s {
+        case .notDetermined: return "notDetermined"
+        case .restricted: return "restricted"
+        case .denied: return "denied"
+        case .authorized: return "authorized"
+        case .limited: return "limited"
+        @unknown default: return "unknown"
+        }
+    }
+
+    /// 同步请求一次缩略图，把回调里的关键信息原样记下来
+    private static func probe(_ asset: PHAsset,
+                              _ delivery: PHImageRequestOptionsDeliveryMode,
+                              network: Bool) -> String {
+        let options = PHImageRequestOptions()
+        options.isSynchronous = true
+        options.deliveryMode = delivery
+        options.resizeMode = .fast
+        options.isNetworkAccessAllowed = network
+
+        var notes: [String] = []
+        PHImageManager.default().requestImage(
+            for: asset,
+            targetSize: CGSize(width: 320, height: 320),
+            contentMode: .aspectFit,
+            options: options
+        ) { image, info in
+            let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+            let cancelled = (info?[PHImageCancelledKey] as? Bool) ?? false
+            let error = (info?[PHImageErrorKey] as? NSError)?.localizedDescription ?? "-"
+            let inCloud = (info?[PHImageResultIsInCloudKey] as? Bool) ?? false
+            let size = image.map { "\(Int($0.size.width))x\(Int($0.size.height))" } ?? "nil"
+            notes.append("image=\(size) degraded=\(degraded) cancelled=\(cancelled) "
+                         + "inCloud=\(inCloud) err=\(error)")
+        }
+        if notes.isEmpty { notes.append("回调一次都没调") }
+        return notes.joined(separator: " | ")
+    }
+
+    private static func write(_ lines: [String]) {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let url = dir.appendingPathComponent("po-diag.txt")
+        let text = lines.joined(separator: "\n") + "\n"
+        try? text.write(to: url, atomically: true, encoding: .utf8)
+        NSLog("[PODiag] wrote diag file at %@", url.path)
+    }
+}
+#endif
+

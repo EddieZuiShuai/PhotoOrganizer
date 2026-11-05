@@ -1,9 +1,7 @@
 appId: com.eddie.photoorganizer
 name: 04 预览：长按进大图 / 标记待删 / 返回后选中保留
 ---
-- runFlow: ../subflows/scan.yaml
-
-- tapOn: "大文件.*"
+- runFlow: ../subflows/open_large.yaml
 - tapOn: "三列"
 
 # 长按第一张进入全屏预览
@@ -12,7 +10,7 @@ name: 04 预览：长按进大图 / 标记待删 / 返回后选中保留
     index: 0
 
 - extendedWaitUntil:
-    visible: "1 / 12"
+    visible: "1 / [0-9]+"
     timeout: 15000
 - takeScreenshot: 06_preview
 
@@ -27,6 +25,8 @@ name: 04 预览：长按进大图 / 标记待删 / 返回后选中保留
     id: "preview-mark"
 - assertNotVisible: "已标记待删"
 - assertVisible: "标记待删"
+
+# 第三次点回来，留着标记交给后面的「返回后仍在」
 - tapOn:
     id: "preview-mark"
 - assertVisible: "已标记待删"

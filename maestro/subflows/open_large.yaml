@@ -1,0 +1,26 @@
+appId: com.eddie.photoorganizer
+name: 共用 - 打开大文件页
+---
+# 为什么绕这一圈：
+# 标签栏是横向滚动的，在 iPhone SE 上「模糊」都已经贴到右边缘，
+# 「大文件」整个在屏幕外 —— 无障碍树里根本没有它，tapOn 必然失败。
+# 空间看板底部那个「去看大文件」按钮一直在屏幕内，是更稳的入口。
+#
+# 落地后顺便切到「单列」：只有大文件页会显示「按体积从大到小 · 共 X」，
+# 用它来确认确实停在了这一页，比断言标签文字可靠。
+- runFlow: scan.yaml
+
+- tapOn: "空间"
+- extendedWaitUntil:
+    visible: "去看大文件.*"
+    timeout: 10000
+- takeScreenshot: 01_dashboard
+- tapOn: "去看大文件.*"
+
+- extendedWaitUntil:
+    visible: "单列"
+    timeout: 10000
+- tapOn: "单列"
+- extendedWaitUntil:
+    visible: "按体积从大到小.*"
+    timeout: 10000

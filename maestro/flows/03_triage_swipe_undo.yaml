@@ -1,43 +1,50 @@
 appId: com.eddie.photoorganizer
 name: 03 逐张过：首滑、连划、撤销
 ---
-- runFlow: ../subflows/scan.yaml
+- runFlow: ../subflows/open_large.yaml
+- tapOn: "三列"
 
-# 用大文件页（12 张）做逐张过，样本足够
-- tapOn: "大文件.*"
 - tapOn: "逐张过"
 - assertVisible: "左滑删 · 右滑留"
-- assertVisible: "1 / 12"
+# 张数取决于相册里有多少照片，这里只断言「停在第 1 张」
+- assertVisible: "1 / [0-9]+"
 - waitForAnimationToEnd
 - takeScreenshot: 04_triage_first
 
-# 第一下左滑就必须换图（v1.4 主修复）
+# v1.4 的主修复：第一下滑出去，卡片里的图要跟着换
 - swipe:
     start: "85%,55%"
     end: "15%,55%"
     duration: 400
-- assertVisible: "2 / 12"
-- waitForAnimationToEnd
+- assertVisible: "2 / [0-9]+"
 - takeScreenshot: 05_triage_second
 
-# 撤销要退回第 1 张
+# 撤销：回到第 1 张，且不留标记
 - tapOn:
     id: "triage-undo"
-- assertVisible: "1 / 12"
+- assertVisible: "1 / [0-9]+"
+- assertNotVisible: "已标 [0-9]+"
 
-# 左滑 = 标记删除
+# 按钮删除 → 标记计数 +1
 - tapOn:
     id: "triage-delete"
-- assertVisible: "2 / 12"
+- assertVisible: "2 / [0-9]+"
 - assertVisible: "已标 1"
 
-# 右滑 = 保留，不计数
+# 按钮保留 → 继续前进，标记数不变
 - tapOn:
     id: "triage-keep"
-- assertVisible: "3 / 12"
+- assertVisible: "3 / [0-9]+"
 - assertVisible: "已标 1"
 
-# 再撤一步，回到第 2 张
+# 再撤销一次，回到第 2 张
 - tapOn:
     id: "triage-undo"
-- assertVisible: "2 / 12"
+- assertVisible: "2 / [0-9]+"
+
+# 关掉逐张过，标记要带回列表
+- tapOn: "关闭逐张过"
+- extendedWaitUntil:
+    visible: "已选 1 张.*"
+    timeout: 10000
+- tapOn: "取消"

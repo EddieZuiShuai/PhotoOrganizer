@@ -1,11 +1,9 @@
 appId: com.eddie.photoorganizer
 name: 02 选中与跨分类保留
 ---
-- runFlow: ../subflows/scan.yaml
+- runFlow: ../subflows/open_large.yaml
 
-# 大文件页选第一张
-- tapOn: "大文件.*"
-# 强制用三列网格：单列布局下的行没有「照片 xx」这个无障碍标签，定位不到
+# 回到三列网格：单列的行没有「照片 xx」这个无障碍标签
 - tapOn: "三列"
 - tapOn:
     text: "照片 .*"
@@ -30,3 +28,7 @@ name: 02 选中与跨分类保留
     text: "照片 .*"
     index: 0
 - assertVisible: "已选 1 张.*"
+
+# 收尾：取消勾选，别把状态留给下一条
+- tapOn: "取消"
+- assertVisible: "点一下选中.*"

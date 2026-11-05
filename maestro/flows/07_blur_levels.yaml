@@ -1,29 +1,29 @@
 appId: com.eddie.photoorganizer
-name: 07 模糊页：三档灵敏度 + 空状态文案
+name: 07 模糊页：三档灵敏度
 ---
-- runFlow: ../subflows/scan.yaml
+- runFlow: ../subflows/open_large.yaml
 
 - tapOn: "模糊 .*"
 
-# 模糊页特有的判定条要出现
+# 模糊页特有的判定条
 - assertVisible: "模糊判定"
 - assertVisible: "宽松"
 - assertVisible: "标准"
 - assertVisible: "严格"
-- takeScreenshot: 10_blur_default
+- takeScreenshot: 11_blur_default
 
-# 三档来回切：每档都要么给出照片，要么给出对应档位的空状态文案
+# 三档来回切，每档都不能崩、判定条要一直在
 - tapOn: "宽松"
 - assertVisible: "模糊判定"
-- takeScreenshot: 11_blur_loose
+- takeScreenshot: 12_blur_loose
 
 - tapOn: "标准"
 - assertVisible: "模糊判定"
 
 - tapOn: "严格"
 - assertVisible: "模糊判定"
-- takeScreenshot: 12_blur_strict
+- takeScreenshot: 13_blur_strict
 
-# 非模糊页不应该出现判定条
-- tapOn: "大文件.*"
+# 切回普通分类，判定条要消失
+- tapOn: "建议清理.*"
 - assertNotVisible: "模糊判定"

@@ -1,37 +1,35 @@
 appId: com.eddie.photoorganizer
 name: 06 布局三档切换 + 分组页隐藏布局按钮
 ---
-- runFlow: ../subflows/scan.yaml
+- runFlow: ../subflows/open_large.yaml
 
-- tapOn: "大文件.*"
-
-# 三列 → 单列：列表模式会多出一行「按体积从大到小」
-- tapOn: "三列"
-- assertNotVisible: "按体积从大到小.*"
-- tapOn: "单列"
+# 单列（子流程落地时已经切好）：列表顶部有「按体积从大到小」
 - assertVisible: "按体积从大到小.*"
-- takeScreenshot: 09_layout_list
 
-# 单列 → 两列 → 三列，来回切不能崩、不能白屏
+# 换成两列 / 三列：变成格子，那行说明消失，格子仍在
 - tapOn: "两列"
 - assertNotVisible: "按体积从大到小.*"
-- assertVisible: "大文件.*"
-- tapOn: "三列"
-- assertVisible: "大文件.*"
+- assertVisible: "照片 .*"
 
-# 布局选择会记住：重启 App 后仍是刚选的那一档
+- takeScreenshot: 09_layout_two
+
+- tapOn: "三列"
+- assertNotVisible: "按体积从大到小.*"
+- assertVisible: "照片 .*"
+
+
+# 布局选择会记住：切成单列 → 冷启动 → 回到大文件页，应该还是单列
 - tapOn: "单列"
-# 重新走一遍冷启动（子流程里已包含滚动 + 授权兜底 + 等扫描）
 - runFlow: ../subflows/scan.yaml
-- tapOn: "大文件.*"
-- assertVisible: "按体积从大到小.*"
-
-# 收尾：切回三列，免得影响后面用例里的「照片 xx」定位
-- tapOn: "三列"
+- tapOn: "空间"
+- tapOn: "去看大文件.*"
+- extendedWaitUntil:
+    visible: "按体积从大到小.*"
+    timeout: 12000
+- takeScreenshot: 10_layout_remembered
 
 # 分组页（重复 / 相似）不应该出现布局按钮
 - tapOn: "重复.*"
 - assertNotVisible: "单列"
 - assertNotVisible: "两列"
-- tapOn: "大文件.*"
-- assertVisible: "三列"
+- assertNotVisible: "三列"

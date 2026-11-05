@@ -1,20 +1,18 @@
 appId: com.eddie.photoorganizer
 name: 05 全选 / 取消全选 / 清空
 ---
-- runFlow: ../subflows/scan.yaml
-
-- tapOn: "大文件.*"
+- runFlow: ../subflows/open_large.yaml
 - tapOn: "三列"
 
-# 全选：12 张测试图应该一次全勾上
-- tapOn: "全选 12"
-- assertVisible: "已选 12 张.*"
-- assertVisible: "删除 12 张"
+# 全选：按钮上就是这个分类的总张数
+- tapOn: "全选 [0-9]+"
+- assertVisible: "已选 [0-9]+ 张.*"
+- assertVisible: "删除 [0-9]+ 张"
 - takeScreenshot: 08_select_all
 
 # 取消全选：计数归零，底部回到「重新扫描 / 导出清单」
 - tapOn: "取消全选"
-- assertNotVisible: "已选 12 张.*"
+- assertNotVisible: "已选 [0-9]+ 张.*"
 - assertVisible: "重新扫描"
 - assertVisible: "导出清单"
 
@@ -28,3 +26,4 @@ name: 05 全选 / 取消全选 / 清空
 - assertVisible: "已选 2 张.*"
 - tapOn: "清空"
 - assertVisible: "点一下选中.*"
+- assertVisible: "重新扫描"
