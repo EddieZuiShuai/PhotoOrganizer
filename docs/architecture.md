@@ -91,7 +91,8 @@ Models/
 | 隐私不参与打分 | `category.isPrivacy`（照片 / 视频两类）直接跳过 `buildScores`，也不进 `suggestedItems` | `AnalysisEngine.buildScores` |
 | 隐私视频 | 抽帧：封面帧先算；封面肤色 > 0.06 且未过线时，再抽 30% / 65% 两帧（`AVAssetImageGenerator`，`appliesPreferredTrackTransform = true`），取最高分。视频只有这一类进 `categoryBuckets` | `AnalysisEngine.privacyScoreForVideo` |
 | 隐私口径迁移 | `privacyModelVersion`（UserDefaults）小于当前值时，把缓存里隐私条目的 `contentDone` 置回 false，只重判这几百条 | `ScanCache.resetPrivacyJudgements` |
-| 隐私缩略图打码 | `@AppStorage("blurPrivacyThumbnails")`，默认 false（仍在校准误报）。分类详情页、清理页网格与列表都读它 | `ContentView` 三处 |
+| 隐私缩略图打码 | `@AppStorage("blurPrivacyThumbnails")`，默认 true。分类详情页、清理页网格与列表都读它 | `ContentView` 三处 |
+| 隐私分类显示开关 | `@AppStorage("showPrivacyCategory")`，默认 false。两个隐私类（照片/视频）一起受它控制 | `ContentView` 三处 |
 | 宠物 | 场景标签里有 dog/cat/pet/animal → 补跑 `VNRecognizeAnimalsRequest`，命中 Dog/Cat 且 conf ≥ 0.5 → 直接判宠物（排在美食/风景之前） | `ContentAnalyzer.detectAnimal` |
 | 增量命中 | `localIdentifier` 相同 **且** `abs(modificationDate 差) ≤ 1s` | `ScanCache.hit` |
 

@@ -554,8 +554,8 @@ struct ResultView: View {
     @AppStorage("blurSensitivity") private var blurLevel: Int = 1
     /// 设置页里的两个开关。放在这里是因为「清理」页要用它们决定
     /// 是否显示隐私页签、缩略图要不要糊；用 @AppStorage 才能跟着开关即时重绘。
-    @AppStorage("showPrivacyCategory") private var showPrivacyCategory: Bool = true
-    @AppStorage("blurPrivacyThumbnails") private var blurPrivacyThumbnails: Bool = false
+    @AppStorage("showPrivacyCategory") private var showPrivacyCategory: Bool = false
+    @AppStorage("blurPrivacyThumbnails") private var blurPrivacyThumbnails: Bool = true
     @State private var ignoredBlurIDs: Set<String> = BlurIgnoreStore.shared.all()
     @State private var lastLongPressAt: Date = .distantPast
 
@@ -2473,7 +2473,7 @@ struct CategoryOverviewView: View {
     @Binding var deletedIDs: Set<String>
 
     /// 和「清理」页读同一个键：这边关掉，那边的两个隐私页签也一起消失
-    @AppStorage("showPrivacyCategory") private var showPrivacyCategory: Bool = true
+    @AppStorage("showPrivacyCategory") private var showPrivacyCategory: Bool = false
 
     private let columns = [GridItem(.adaptive(minimum: 150), spacing: 12)]
 
@@ -2578,7 +2578,7 @@ struct CategoryDetailView: View {
     let items: [PhotoItem]
     @Binding var deletedIDs: Set<String>
 
-    @AppStorage("blurPrivacyThumbnails") private var blurPrivacyThumbnails: Bool = false
+    @AppStorage("blurPrivacyThumbnails") private var blurPrivacyThumbnails: Bool = true
 
     @State private var selected: Set<String> = []
     @State private var previewTarget: PreviewTarget?
@@ -2786,8 +2786,8 @@ struct SettingsTabView: View {
 
     /// 两个隐私开关。用 @AppStorage 而不是本地 @State：
     /// 「清理」页也要读同一个键，否则设置改完回去不生效。
-    @AppStorage("showPrivacyCategory") private var showPrivacyCategory: Bool = true
-    @AppStorage("blurPrivacyThumbnails") private var blurPrivacyThumbnails: Bool = false
+    @AppStorage("showPrivacyCategory") private var showPrivacyCategory: Bool = false
+    @AppStorage("blurPrivacyThumbnails") private var blurPrivacyThumbnails: Bool = true
 
     @Environment(\.scenePhase) private var scenePhase
 

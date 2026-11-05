@@ -229,51 +229,70 @@ struct TriageMedia: View {
     @ViewBuilder
     private func videoLayer(geo: GeometryProxy) -> some View {
         ZStack {
-            if let player = video.player {
-                TriagePlayerSurface(player: player)
-                    .frame(width: geo.size.width, height: geo.size.height)
-            } else if let poster = poster {
-                Image(uiImage: poster)
-                    .resizable()
-                    .scaledToFit()
-                    .frame(width: geo.size.width, height: geo.size.height)
-            } else if video.failed {
-                VStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 24))
-                    Text("这段视频读不出来（可能只存在 iCloud 上）")
-                        .font(.system(size: 12))
-                        .multilineTextAlignment(.center)
+            // 可点区域：封面 / 播放器 + 播放角标。播放/暂停的 tap 只挂在这一层，
+            // 这样右上角喇叭按钮（下面的独立覆盖层）被点的时候不会再触发播放/暂停。
+            ZStack {
+                if let player = video.player {
+                    TriagePlayerSurface(player: player)
+                        .frame(width: geo.size.width, height: geo.size.height)
+                } else if let poster = poster {
+                    Image(uiImage: poster)
+                        .resizable()
+                        .scaledToFit()
+                        .frame(width: geo.size.width, height: geo.size.height)
+                } else if video.failed {
+                    VStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 24))
+                        Text("这段视频读不出来（可能只存在 iCloud 上）")
+                            .font(.system(size: 12))
+                            .multilineTextAlignment(.center)
+                    }
+                    .foregroundColor(.white.opacity(0.7))
+                    .padding(.horizontal, 24)
+                } else {
+                    ProgressView().tint(.white)
                 }
-                .foregroundColor(.white.opacity(0.7))
-                .padding(.horizontal, 24)
-            } else {
-                ProgressView().tint(.white)
-            }
 
-            if video.player == nil {
-                // 封面上的播放角标：明确告诉用户「这是视频，可以点」
-                VStack(spacing: 6) {
-                    if video.loading {
-                        ProgressView().tint(.white)
+                if video.player == nil {
+                    // 封面上的播放角标：明确告诉用户「这是视频，可以点」
+                    VStack(spacing: 6) {
+                        if video.loading {
+                            ProgressView().tint(.white)
+                        } else {
+                            Image(systemName: "play.circle.fill")
+                                .font(.system(size: 52))
+                                .foregroundColor(.white.opacity(0.9))
+                                .shadow(color: .black.opacity(0.45), radius: 10)
+                            Text(video.failed ? "重试播放" : "点一下播放")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundColor(.white.opacity(0.85))
+                        }
+                    }
+                } else if !video.isPlaying {
+                    Image(systemName: "play.circle.fill")
+                        .font(.system(size: 52))
+                        .foregroundColor(.white.opacity(0.9))
+                        .shadow(color: .black.opacity(0.45), radius: 10)
+                }
+            }
+            .frame(width: geo.size.width, height: geo.size.height)
+            .contentShape(Rectangle())
+            // 用 simultaneousGesture 而不是 onTapGesture：卡片本身挂着拖拽手势，
+            // 两个独立手势叠在一起时 tap 会被拖拽吞掉（要拖 6pt 才成立，tap 就永远不触发）。
+            .simultaneousGesture(
+                TapGesture().onEnded {
+                    if video.player == nil {
+                        video.load(item.asset)
                     } else {
-                        Image(systemName: "play.circle.fill")
-                            .font(.system(size: 52))
-                            .foregroundColor(.white.opacity(0.9))
-                            .shadow(color: .black.opacity(0.45), radius: 10)
-                        Text(video.failed ? "重试播放" : "点一下播放")
-                            .font(.system(size: 11, weight: .medium))
-                            .foregroundColor(.white.opacity(0.85))
+                        video.toggle()
                     }
                 }
-            } else if !video.isPlaying {
-                Image(systemName: "play.circle.fill")
-                    .font(.system(size: 52))
-                    .foregroundColor(.white.opacity(0.9))
-                    .shadow(color: .black.opacity(0.45), radius: 10)
-            }
+            )
 
-            // 静音开关单独一个角标，避免「怎么没声音」的疑问
+            // 静音开关单独一个角标，避免「怎么没声音」的疑问。
+            // 它是「可点区域」之外的独立覆盖层：Button 自己吃掉这次 tap，
+            // 不会再同时触发上面那层的播放/暂停（否则点喇叭会先静音→又暂停）。
             if video.player != nil {
                 VStack {
                     HStack {
@@ -295,17 +314,6 @@ struct TriageMedia: View {
                 .padding(10)
             }
         }
-        // 用 simultaneousGesture 而不是 onTapGesture：卡片本身挂着拖拽手势，
-        // 两个独立手势叠在一起时 tap 会被拖拽吞掉（要拖 6pt 才成立，tap 就永远不触发）。
-        .simultaneousGesture(
-            TapGesture().onEnded {
-                if video.player == nil {
-                    video.load(item.asset)
-                } else {
-                    video.toggle()
-                }
-            }
-        )
     }
 
     // MARK: 加载
