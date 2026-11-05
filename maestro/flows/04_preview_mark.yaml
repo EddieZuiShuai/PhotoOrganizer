@@ -40,5 +40,5 @@ name: 04 预览：长按进大图 / 标记待删 / 返回后选中保留
 - takeScreenshot: 07_preview_back
 
 # 清理干净，别把状态留给下一条用例
-- tapOn: "取消"
+- tapOn: "取消选中 [0-9]+ 张"
 - assertVisible: "点一下选中.*"

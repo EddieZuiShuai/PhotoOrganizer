@@ -34,5 +34,5 @@ name: 08 逐张过：连续标记后关掉，标记要带回列表
 - takeScreenshot: 15_triage_back
 
 # 收尾：取消勾选，不真的删
-- tapOn: "取消"
+- tapOn: "取消选中 [0-9]+ 张"
 - assertVisible: "点一下选中.*"

@@ -47,4 +47,4 @@ name: 03 逐张过：首滑、连划、撤销
 - extendedWaitUntil:
     visible: "已选 1 张.*"
     timeout: 10000
-- tapOn: "取消"
+- tapOn: "取消选中 [0-9]+ 张"
