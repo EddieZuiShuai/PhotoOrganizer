@@ -85,27 +85,34 @@ jobs:
           set +e
           maestro test \
             --test-output-dir build/maestro-results \
-            --flat-output \
+            --flatten-debug-output \
             --format junit \
             --output build/maestro-report.xml \
             maestro/flows
           CODE=$?
+          set -e
           echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
           echo "Maestro exit code: $CODE"
-          exit 0
+          # 列一下到底产出了什么，方便排查
+          find build/maestro-results -type f | head -50 || true
+          find build -maxdepth 1 -name 'maestro-report.xml' -exec ls -l {} \; || true
+          # 让这一步自己变红，失败不要藏在后面几步里
+          exit $CODE
 
       - name: 检查「滑过之后图片真的换了」
         if: always()
         run: |
-          if [ -f build/maestro-results/04_triage_first.png ] && [ -f build/maestro-results/05_triage_second.png ]; then
+          FIRST=$(find build/maestro-results -name '04_triage_first.png' | head -1)
+          SECOND=$(find build/maestro-results -name '05_triage_second.png' | head -1)
+          if [ -n "$FIRST" ] && [ -n "$SECOND" ]; then
+            echo "对比：$FIRST  →  $SECOND"
             python3 -m venv .venv-shots
             .venv-shots/bin/pip install --quiet pillow
-            .venv-shots/bin/python scripts/check_triage_shots.py \
-              build/maestro-results/04_triage_first.png \
-              build/maestro-results/05_triage_second.png
+            .venv-shots/bin/python scripts/check_triage_shots.py "$FIRST" "$SECOND"
           else
             echo "没有拿到对比截图，跳过像素校验"
-            ls -R build/maestro-results || true
+            echo "（说明逐张过那条用例没跑到截图那一步，先看上面的 Maestro 输出）"
+            find build/maestro-results -type f | head -50 || true
           fi
 
       - name: 上传报告与截图
@@ -118,10 +125,15 @@ jobs:
             build/maestro-results
           retention-days: 14
 
-      - name: 用例失败时让任务变红
+      - name: 结果汇总
         if: always()
         run: |
           echo "Maestro exit: ${{ steps.test.outputs.exit_code }}"
-          if [ "${{ steps.test.outputs.exit_code }}" != "0" ]; then
-            exit 1
+          if [ -f build/maestro-report.xml ]; then
+            echo "--- junit 摘要 ---"
+            grep -o '<testsuite [^>]*' build/maestro-report.xml | head -5 || true
+            grep -c '<testcase' build/maestro-report.xml || true
+          else
+            echo "没有生成 junit 报告（Maestro 可能根本没跑起来，或参数仍不对）"
           fi
+          echo "结论：exit=${{ steps.test.outputs.exit_code }}（0 = 全通过）"
