@@ -38,6 +38,7 @@
 | 改扫描、判定、性能、内存 | `docs/architecture.md` | `docs/component-api.md` |
 | 改构建、跑测试、发版 | `docs/development.md` | — |
 | 接需求、排优先级、判断"做不做" | `docs/TODO.md`、`docs/user-guide.md` | `docs/project-overview.md` |
+| 做新手引导 / 教程 / 首启引导 | `docs/onboarding-spec.md` | `docs/DESIGN.md`、`docs/user-guide.md` |
 | 回答"这功能怎么用 / 这个数字什么意思" | `docs/user-guide.md` | `docs/project-overview.md` |
 
 ## 事实归属（一条事实只写一处，别处只能链过去）
@@ -49,6 +50,7 @@
 | 数据流、判定阈值、线程与内存策略 | `docs/architecture.md` |
 | 公共类型 / 函数签名 / 调用边界 / 不变量 | `docs/component-api.md` |
 | 颜色、字号、圆角、交互纪律、文案语气 | `docs/DESIGN.md` |
+| 新手教程讲什么、怎么翻页、状态键叫什么 | `docs/onboarding-spec.md` |
 | 用户怎么用、数字怎么读、误判怎么办 | `docs/user-guide.md` |
 | 现在做什么、做到哪、下一步做什么 | `docs/TODO.md` |
 | 入口、铁律、路由 | 本文件 |
@@ -80,3 +82,5 @@
 ## 当前版本
 
 `1.4 (20)`：底部四 tab（清理/分类/空间/我的）、左右滑完整显示 + 内置视频播放 + 标记与删除拆开、隐私判定 v2（排除人脸 + 裸露密度）、宠物专用模型。19 修了缓存落盘的 CPU 写放大，并临时关掉隐私缩略图打码以便校准误报（20 仍关闭）。
+
+**下个版本 `1.5 (21)` 已排定**：主题是「第一次用的人不困惑」，第一项是新手教程（`docs/onboarding-spec.md` 已写完，代码未动）。做之前先读那份 spec，别自己重新设计一遍呈现方式——里面每一条"不做"都有踩过的理由。
