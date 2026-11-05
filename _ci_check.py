@@ -10,6 +10,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import time
 import urllib.request
@@ -44,12 +45,19 @@ TOK = token()
 
 
 def api(path):
-    req = urllib.request.Request("https://api.github.com" + path)
-    req.add_header("Authorization", "Bearer " + TOK)
-    req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "wb-agent")
-    with _op.open(req, timeout=60) as r:
-        return json.loads(r.read())
+    last = None
+    for attempt in range(5):
+        try:
+            req = urllib.request.Request("https://api.github.com" + path)
+            req.add_header("Authorization", "Bearer " + TOK)
+            req.add_header("Accept", "application/vnd.github+json")
+            req.add_header("User-Agent", "wb-agent")
+            with _op.open(req, timeout=60) as r:
+                return json.loads(r.read())
+        except Exception as e:            # 网络抖动很正常，别让整轮白等
+            last = e
+            time.sleep(3 * (attempt + 1))
+    raise SystemExit("接口连不上，重试 5 次仍失败：%s" % last)
 
 
 def raw(path):
@@ -98,6 +106,9 @@ def grab_artifacts(run_id):
     if not arts:
         print("没有 artifact")
         return []
+    # 先清空：extractall 不会删旧文件，上一轮的 po-diag.txt 之类会残留下来冒充本轮结果
+    if os.path.isdir(OUT_DIR):
+        shutil.rmtree(OUT_DIR, ignore_errors=True)
     os.makedirs(OUT_DIR, exist_ok=True)
     names = []
     for a in arts:
