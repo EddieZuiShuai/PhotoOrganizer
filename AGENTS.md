@@ -12,9 +12,9 @@
 |---|---|
 | 平台 | iOS 16.0+，仅 iPhone，仅竖屏，固定浅色 |
 | 技术栈 | SwiftUI + Photos + Vision，少量 UIKit；**无第三方依赖、无 SPM** |
-| 规模 | 10 个 Swift 文件约 6.4k 行；最大是 `Views/ContentView.swift`（约 2.3k 行） |
+| 规模 | 11 个 Swift 文件约 8.1k 行；最大是 `Views/ContentView.swift`（约 3.1k 行） |
 | Bundle ID | `com.eddie.photoorganizer` |
-| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.4 / 20**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
+| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.5 / 21**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
 | 怎么编译 | **没有 Mac。** push 到 `main` → GitHub Actions `build.yml` → 下载 ipa → Windows 上用 Sideloadly 签名安装 |
 | 怎么测 | Maestro 云端 UI 用例 8 条（`maestro/flows/`），手动触发 `ui-test.yml`，本机用 `_ci_check.py` 取回结论 |
 
@@ -35,6 +35,7 @@
 |---|---|---|
 | 第一次进项目 | 本文件、`docs/project-overview.md` | `docs/user-guide.md` |
 | 改界面 / 加页面 | `docs/DESIGN.md`、`docs/component-api.md` | `docs/architecture.md` |
+| 改分类枚举 / 加内容类别 | `docs/component-api.md` 的枚举表、`docs/architecture.md` 的判定口径 | `docs/DESIGN.md` |
 | 改扫描、判定、性能、内存 | `docs/architecture.md` | `docs/component-api.md` |
 | 改构建、跑测试、发版 | `docs/development.md` | — |
 | 接需求、排优先级、判断"做不做" | `docs/TODO.md`、`docs/user-guide.md` | `docs/project-overview.md` |
@@ -78,9 +79,13 @@
 - **增量扫描很"快"但后台烧 CPU** → `flush()` 无条件全量编码（5.5 MB × 28 次）；只编码 dirty、增量日志追加，全命中时一次都不写
 - **底部 tab 不能用系统 `TabView`** → 切走就销毁页面，`selectedIDs`/滚动位置/筛选全丢。用四页常驻 + `opacity`；`bottomArea` 必须是 `safeAreaInset` 不是 `overlay`，否则压在 tab bar 上
 - **隐私判定先排除人脸再算密度** → 旧公式「肤色 × 人体」在自拍上必然过线；且肤色统计要先用 `uprightCGImage` 把 EXIF 方向烤进像素，否则竖拍照片的「排除人脸」会排到画面边上
+- **隐私有照片和视频两个类** → `ContentCategory` 现在是 `.privacy` + `.privacyVideo`。所有特判必须走 `category.isPrivacy`，写 `== .privacy` 会漏掉视频那一半（1.5 收口了 5 处）
+- **`PHAsset` 不是 `AVAsset`** → `AVAssetImageGenerator(asset:)` 不收 `PHAsset`，要先 `PHImageManager.requestAVAsset` 拿（异步）。抽帧方法内部用信号量同步等，**绝不能在主线程调**
+- **改隐私公式要作废旧结论** → 缓存里 `contentDone = true` 的条目会整段跳过内容识别。只改算法不作废缓存 = 用户永远看不到修复。作废走 `privacyModelVersion` + `ScanCache.resetPrivacyJudgements()`，**不要动 `ScanCache.version`**（那会作废整库，用户要重扫十几分钟）
+- **`git push` 报 schannel / TLS 错** → 环境里有 `http_proxy=127.0.0.1:5804`，git 走它必然握手失败。可靠写法是**行内清空四个变量**：`http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= git push`（`env -u` 在本机 Bash 里会静默失败，别用）
 
 ## 当前版本
 
-`1.4 (20)`：底部四 tab（清理/分类/空间/我的）、左右滑完整显示 + 内置视频播放 + 标记与删除拆开、隐私判定 v2（排除人脸 + 裸露密度）、宠物专用模型。19 修了缓存落盘的 CPU 写放大，并临时关掉隐私缩略图打码以便校准误报（20 仍关闭）。
+`1.5 (21)`：**隐私视频**（封面 + 条件补两帧，同一套密度口径）、隐私拆成「隐私照片 / 隐私视频」两张卡并共用开关、隐私判定 **v3**（加躯干闸门，只露头/证件照不再进组）、分类 tab 改成**就地 NavigationStack 下钻**（不再跳回清理页）、逐张过从右上角挪到列表上方整行入口（**评估后仍不做第五个 tab**）、新手教程 5 页；顺带删了死代码 `blurThreshold`、网格布局补「算清晰」。
 
-**下个版本 `1.5 (21)` 已排定**：主题是「第一次用的人不困惑」，第一项是新手教程（`docs/onboarding-spec.md` 已写完，代码未动）。做之前先读那份 spec，别自己重新设计一遍呈现方式——里面每一条"不做"都有踩过的理由。
+**`1.5-2` 首页首启提示卡还没做**（`docs/TODO.md` P1-10）：底部 tab 要扫描完才出现，所以教程目前只有「我的」一个入口，新用户得自己去找。要补就在首页「开始扫描」**下方**加一张卡，别放上方（会推动按钮位置，8 条 Maestro flow 首屏全要改）。

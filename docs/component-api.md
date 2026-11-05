@@ -52,7 +52,7 @@
 
 | 类型 | 取值 | 用途 |
 |---|---|---|
-| `ContentCategory` | 发票票据 / 文档 / 截图 / 人物 / 美食 / 风景 / 宠物 / 其他 | 带 `icon`（SF Symbols） |
+| `ContentCategory` | 发票票据 / 文档 / 截图 / 人物 / 美食 / 风景 / 宠物 / **隐私照片 / 隐私视频** / 其他 | 带 `icon`（SF Symbols）与 `isPrivacy`（两个隐私类都算，**别再写 `== .privacy`**）。`fromCache(_:)` 认 1.4 的旧名「隐私」 |
 | `ResultTab` | suggested / duplicate / similar / blurry / large / content(ContentCategory) | 结果页标签，带 `title` / `icon` |
 | `LayoutMode` | list(1) / two(2) / three(3) | 列数，`rawValue` 直接当列数 |
 | `AppPhase` | idle / scanning / done | 主容器状态 |
@@ -81,10 +81,19 @@ func delete(assets: [PHAsset], completion: @escaping (Bool, Error?) -> Void)
 
 **规矩**：`thumbnail` / `imageForOCR` / `originalData` 都是同步阻塞调用，只能在后台队列用。UI 层要图一律走 `loadImage`。
 
+### `PhotoLibraryService.shared.privacyFrames`
+
+```swift
+func privacyFrames(for asset: PHAsset, maxPixel: CGFloat = 320) -> [UIImage]
+```
+
+抽 30% / 65% 两帧给隐私判定用。**同步等待，绝不能在主线程调**（内部 5 秒上限，拿不到就返回空）。
+`PHAsset` 不是 `AVAsset`，先走 `PHImageManager.requestAVAsset`，再交给 `AVAssetImageGenerator`；
+`appliesPreferredTrackTransform = true` 不能省，否则竖拍视频坐标差 90°。
+
 ### `AnalysisEngine.shared` — 扫描总调度
 
 ```swift
-var blurThreshold: Double = 25.0          // 死代码：全项目无引用，改它不会改变任何判定
 var similarDistance: Int = 8              // dHash 汉明距离
 var exactCandidateDistance: Int = 3       // 判重复前的预筛
 
@@ -113,8 +122,9 @@ func ocrOnly(image: UIImage) -> (receiptHits: [String], docKeywordHit: Bool, tex
 func invoiceQR(in image: UIImage) -> InvoiceInfo?
 static func parseInvoicePayload(_ raw: String) -> InvoiceInfo?
 func skinRatioOfImage(_ image: UIImage) -> Double          // 96×96 采样，亚毫秒，做隐私闸门
-func privacyScore(image: UIImage, skin: Double? = nil) -> Double
+func privacyScore(image: UIImage, skin: Double? = nil) -> Double   // v3：含躯干闸门
 static let privacyThreshold: Double                        // 0.42
+static let torsoRatioFloor: Double                         // 0.32，非脸人体 ÷ 人体 的下限
 static func uprightCGImage(_ image: UIImage) -> CGImage?   // 把 EXIF 方向烤进像素
 ```
 
@@ -148,7 +158,9 @@ func compress(asset: PHAsset, completion: @escaping (Result<Outcome, Error>) -> 
 | `RefineBanner` | `ContentView.swift` | 阶段二进度横幅 |
 | `SelectableThumb` / `PhotoThumbView` | `ContentView.swift` | 可选中缩略图 / 纯展示缩略图 |
 | `MainTabView` / `MainTabBar` / `MainTab` | `ContentView.swift` | 底部四 tab 容器 / 自绘 tab bar / 枚举（`key` 是 ASCII，供 Maestro） |
-| `CategoryOverviewView` / `SettingsTabView` | `ContentView.swift` | 分类总览 / 我的 |
+| `CategoryOverviewView` / `CategoryDetailView` | `ContentView.swift` | 分类总览（`NavigationStack` 根）/ 单类详情（多选、删除、大图） |
+| `SettingsTabView` | `ContentView.swift` | 我的（显示与内容 / 数据与存储 / 帮助与支持 / 系统权限 / 关于） |
+| `TutorialView` + 5 个 Mock | `TutorialView.swift` | 新手教程 5 页；Mock 全部假数据，不引用 `AnalysisResult` |
 | `SpaceStats` | `ContentView.swift` | 体积统计单一口径（结果页与空间 tab 共用） |
 | `SpaceDashboardView` / `FilterSheet` | `DashboardView.swift` | 体积看板（tab 页，不再是 sheet）/ 时间段与相册筛选 |
 | `SwipeTriageView` / `TriageMedia` | `SwipeTriageView.swift` | 逐张过主界面 / 卡片媒体（照片 fit、视频可播） |

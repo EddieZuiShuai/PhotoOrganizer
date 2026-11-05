@@ -8,8 +8,11 @@
 - 找出**相似照片**（连拍、角度几乎一样）
 - 找出**模糊照片**（和本相册的清晰度中位数比）
 - 找出**大文件**，按体积排序
-- 按内容分类：**发票票据 / 文档 / 截图 / 人物 / 美食 / 风景 / 宠物 / 隐私 / 其他**
+- 按内容分类：**发票票据 / 文档 / 截图 / 人物 / 美食 / 风景 / 宠物 / 隐私照片 / 隐私视频 / 其他**
+- 隐私有照片和视频两类，同一套判定口径；不进「建议清理」，可在「我的」里整体隐藏
 - 选中删除（30 天内在「最近删除」可恢复）、逐张滑动筛查、视频转 720p、导出文本清单
+- 分类里点一张卡片就地下钻到那一类，能多选、能删、能看大图
+- 内置新手教程（5 页，我的 → 帮助与支持）
 - **增量扫描**：算过的照片存本地，第二次扫描通常几十秒；中途被打断也能从断点接着跑
 
 扫描本身不改动任何照片，只有点删除才会真的删。
@@ -54,6 +57,7 @@ PhotoOrganizer/
   Views/ContentView.swift      首页 / 扫描 / 结果页
   Views/DashboardView.swift    空间看板
   Views/SwipeTriageView.swift  逐张过（含视频播放）
+  Views/TutorialView.swift     新手教程 5 页（示意图全部现画）
   Views/PhotoPreviewView.swift 大图与视频
 maestro/                       云端 UI 用例
 .github/workflows/build.yml    自动编译出包
@@ -68,5 +72,6 @@ maestro/                       云端 UI 用例
 | 怎么改代码、怎么发版、回归清单 | [docs/development.md](docs/development.md) |
 | 现在做到哪、下一步做什么 | [docs/TODO.md](docs/TODO.md) |
 | 为什么这么设计 | [docs/project-overview.md](docs/project-overview.md) |
+| 新手教程讲什么、怎么翻页 | [docs/onboarding-spec.md](docs/onboarding-spec.md) |
 | 颜色 / 字号 / 交互规则 | [docs/DESIGN.md](docs/DESIGN.md) |
 | 类型与调用契约 | [docs/component-api.md](docs/component-api.md) |
