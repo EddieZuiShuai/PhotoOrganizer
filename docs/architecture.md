@@ -13,7 +13,8 @@ Views/            纯展示 + 交互状态，不碰 PHImageManager
 Services/         有状态、有队列，全部单例
   PhotoLibraryService  相册读取、缩略图、原图数据、SHA-256、删除
   AnalysisEngine       特征、分组、打分、两阶段调度
-  ContentAnalyzer      Vision 分类 / OCR / 发票二维码
+  ScanCache            增量结果缓存（按照片 ID + 修改时间），兼作断点
+  ContentAnalyzer      Vision 分类 / OCR / 发票二维码 / 隐私粗筛
   VideoCompressor      转 720p 并替换原片
 Models/
   PhotoItem / PhotoGroup / AnalysisResult
@@ -47,6 +48,9 @@ Models/
 
 关键设计：
 
+- **增量优先**：`featurePass` 与 `contentPass` 每一步都先查 `ScanCache`。命中就整段跳过——不取缩略图、不跑 Vision。第二次扫描 1 分钟以内靠的就是这一条。
+- **缓存即断点**：`ScanCache.flush()` 每 800 张落盘一次。被杀之后重启，已算过的直接命中，最多重算最后 800 张。不设单独的「继续上次」入口，避免用户要在两个按钮之间做选择。
+- **缓存失效只认时间戳**：`modificationDate` 变了（裁剪、滤镜、调色）就重算；算法口径变了就改 `ScanCache.version`，整份作废。
 - **两段出货**是为了"一分钟能开始清理"，不是为了"更快"。内容识别那一段本来就要几分钟，把它挪到用户已经在翻结果页之后。
 - **`scanID` 守卫**：每次重扫 `scanID += 1`，所有异步回调回来先对号。否则"重开一局后上一局结果自己弹回来"。
 - **阶段 3 用 `.utility` 而不是 `.userInitiated`**：此时用户正在滚缩略图，不许抢 CPU。
@@ -74,6 +78,11 @@ Models/
 | 相似组非最清晰张 | +0.45 | 同上 |
 | 减分：发票 | -0.45（票据通常要留） | 同上 |
 | 减分：有人脸 | -0.25 | 同上 |
+| 文档（标签判定） | 人脸面积 ≥ 8% 或 ≥ 2 张脸 → 先判人物；否则需命中 `documentLabels` 且置信度 ≥ 0.5 | `ContentAnalyzer.category` |
+| 文档（关键词覆盖） | `docKeywords` 命中 **≥ 2 个** 且人脸面积 < 8% | `ContentAnalyzer.applyKeywords` |
+| 隐私粗筛 | 肤色占比 > 0.12 **且** 人体占比 > 0.10，两项相乘 × 3.2 ≥ 0.34 | `ContentAnalyzer.privacyScore` |
+| 隐私不参与打分 | `category == .privacy` 直接跳过 `buildScores`，也不进 `suggestedItems` | `AnalysisEngine.buildScores` |
+| 增量命中 | `localIdentifier` 相同 **且** `abs(modificationDate 差) ≤ 1s` | `ScanCache.hit` |
 
 `cleanupScore` 是这些加减分的累加，界面显示为百分比。它表示"综合可疑度"，不是"删除概率"。
 

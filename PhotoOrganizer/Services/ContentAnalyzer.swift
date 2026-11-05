@@ -67,7 +67,9 @@ final class ContentAnalyzer {
     ///
     /// 故意不收 text / poster / screenshot / web page 这类一命中一大片的标签，
     /// 否则等于每张图都要多取一次 1024px 的大图，扫描时间会被拖垮。
-    private let documentLabels: [String] = [
+    ///
+    /// `static` 是因为 `category(...)` 是静态方法——判定口径只依赖标签，和实例无关。
+    private static let documentLabels: [String] = [
         "receipt", "invoice", "document", "paper", "form", "letter",
         "business card", "ticket", "banknote", "menu", "book",
         "newspaper", "magazine", "spreadsheet", "whiteboard", "price tag"
@@ -186,7 +188,7 @@ final class ContentAnalyzer {
             textLikeLabels.contains { item.name.contains($0) }
         }
         out.documentLike = labels.contains { item in
-            documentLabels.contains { item.name.contains($0) }
+            Self.documentLabels.contains { item.name.contains($0) }
         }
         out.category = Self.category(
             from: labels,
@@ -222,7 +224,7 @@ final class ContentAnalyzer {
         //    只认 documentLabels 里那几个「纸面」标签，且要 0.5 以上；
         //    page / web page 这种一命中一大片的词，单独出现不算。
         let strongDoc = labels.contains { item in
-            item.conf >= 0.5 && documentLabels.contains { item.name.contains($0) }
+            item.conf >= 0.5 && Self.documentLabels.contains { item.name.contains($0) }
         }
         if strongDoc {
             return .document
