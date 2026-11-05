@@ -519,11 +519,6 @@ final class AnalysisEngine {
                 }
             }
 
-            // 网图 / 表情包
-            if item.category == .meme {
-                add(item.id, 0.3, "看着像网图/表情包")
-            }
-
             // 扣分项：这些通常是「要留的」
             if item.category == .receipt {
                 add(item.id, -0.45, "")

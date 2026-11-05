@@ -10,7 +10,6 @@ enum ContentCategory: String, CaseIterable, Identifiable {
     case food = "美食"
     case scenery = "风景"
     case pet = "宠物"
-    case meme = "网图表情"
     case other = "其他"
 
     var id: String { rawValue }
@@ -24,7 +23,6 @@ enum ContentCategory: String, CaseIterable, Identifiable {
         case .food: return "fork.knife"
         case .scenery: return "mountain.2.fill"
         case .pet: return "pawprint.fill"
-        case .meme: return "face.smiling"
         case .other: return "square.grid.2x2"
         }
     }

@@ -570,6 +570,11 @@ struct ResultView: View {
             ScrollView {
                 scrollContent
             }
+            // 切页签时把滚动位置一起重置。
+            // 不加这句的话，ScrollView 是同一个实例、只换内容：从「建议清理 2807 张」
+            // 滚到第 800 屏再点「重复」，新内容只有五张卡片，滚动位置还停在原处，
+            // 于是整片空白——这正是「切到别的页签再回来内容变空」的真正原因。
+            .id(tab)
             // 挂在 ScrollView 上而不是外层链路上：外层已经有一个「压缩确认」，
             // 两个 confirmationDialog 叠在同一个视图上容易只生效一个。
             .confirmationDialog(
@@ -1274,10 +1279,11 @@ struct ResultView: View {
             }
 
             Text(group.isExactDuplicate
-                 ? "原图文件字节完全一致（已逐张核对）"
-                 : "内容接近但不完全相同")
+                 ? "原图文件字节完全一致（已逐张核对）· 点图选中，右上角 ⤢ 放大"
+                 : "内容接近但不完全相同 · 点图选中，右上角 ⤢ 放大")
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
+                .lineLimit(1)
 
             ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 10) {
@@ -1286,6 +1292,7 @@ struct ResultView: View {
                             item: item,
                             isSelected: selectedIDs.contains(item.id),
                             size: 96,
+                            showsZoomBadge: true,
                             onOpen: { open(item, in: group.items) },
                             onToggle: { toggle(item.id) }
                         )
@@ -1293,6 +1300,9 @@ struct ResultView: View {
                 }
                 .padding(.vertical, 2)
             }
+            // 横向 ScrollView 嵌在 LazyVStack 里时，高度在首帧可能测不出来（返回 0），
+            // 整张卡片就塌成一条线。给死高度，别让系统去猜。
+            .frame(height: 104)
 
             HStack {
                 Button {
@@ -2001,6 +2011,10 @@ struct SelectableThumb: View {
     let item: PhotoItem
     let isSelected: Bool
     var size: CGFloat = 96
+    /// 右上角是否画一个放大角标。
+    /// 分组卡片（重复 / 相似）里只有长按手势，界面上没有任何可见入口，
+    /// 用户根本不知道能放大——长按是隐藏技能，不能当主入口用。
+    var showsZoomBadge: Bool = false
     let onOpen: () -> Void
     let onToggle: () -> Void
 
@@ -2030,6 +2044,27 @@ struct SelectableThumb: View {
                 .stroke(isSelected ? blue : Color.clear, lineWidth: 2.5)
         )
         .cornerRadius(8)
+        .overlay(
+            Group {
+                if showsZoomBadge {
+                    // 用 Button 而不是再挂一个 onTapGesture：手势会和下面的「点一下选中」抢，
+                    // 点放大变成又选中又弹窗。
+                    Button(action: onOpen) {
+                        Image(systemName: "arrow.up.left.and.arrow.down.right")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(.white)
+                            .frame(width: 24, height: 24)
+                            .background(Circle().fill(Color.black.opacity(0.45)))
+                            .overlay(Circle().stroke(Color.white.opacity(0.5), lineWidth: 0.8))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(4)
+                    .accessibilityLabel("放大 " + item.displayName)
+                    .accessibilityIdentifier("zoom-" + item.displayName)
+                }
+            },
+            alignment: .topTrailing
+        )
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .onTapGesture(perform: onToggle)
         .onLongPressGesture(minimumDuration: 0.35, perform: onOpen)

@@ -206,9 +206,8 @@ final class ContentAnalyzer {
         if faceCount > 0 || hasAny(labels, ["person", "people", "portrait", "selfie", "human", "face", "child", "man", "woman", "baby"]) {
             return .person
         }
-        if hasAny(labels, ["cartoon", "illustration", "clip art", "graphic design", "comic", "drawing", "logo", "emoticon"]) {
-            return .meme
-        }
+        // 「网图表情」这个分类已经去掉：系统分类模型对 cartoon / illustration 的召回太宽，
+        // 正常插画、海报、截图都会被拖进来，用户实际用不上，还污染其他分组。
         return .other
     }
 
