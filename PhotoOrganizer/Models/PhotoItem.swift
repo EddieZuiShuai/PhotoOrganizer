@@ -4,6 +4,7 @@ import Photos
 /// 内容分类（全部由本机 Vision 框架离线识别，照片不出手机）
 enum ContentCategory: String, CaseIterable, Identifiable {
     case receipt = "发票票据"
+    case qrCode = "二维码"
     case document = "文档"
     case screenshot = "截图"
     case person = "人物"
@@ -19,6 +20,7 @@ enum ContentCategory: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .receipt: return "doc.text.fill"
+        case .qrCode: return "qrcode"
         case .document: return "doc.richtext"
         case .screenshot: return "rectangle.dashed"
         case .person: return "person.fill"
@@ -37,6 +39,16 @@ enum ContentCategory: String, CaseIterable, Identifiable {
     /// 所以统一收在这里，别再写 `== .privacy`。
     var isPrivacy: Bool {
         self == .privacy || self == .privacyVideo
+    }
+
+    /// 非发票二维码只在「还没被更强信号认领」时才算二维码——
+    /// 人物 / 美食 / 风景 / 宠物这类已经拿到的强结论，不该被一枚码推翻。
+    /// 二维码只覆盖「截图 / 文档 / 其他」这种弱分类。
+    var isQRWeakCategory: Bool {
+        switch self {
+        case .screenshot, .document, .other: return true
+        default: return false
+        }
     }
 
     /// 从缓存里还原。旧缓存存的是 `"隐私"`（1.4 及更早的类名），
@@ -162,11 +174,6 @@ struct AnalysisResult {
 
     var photoCount: Int {
         items.filter { !$0.isVideo }.count
-    }
-
-    /// 发票票据数量
-    var receiptCount: Int {
-        (categoryBuckets[.receipt] ?? []).count
     }
 
     /// 预计可释放空间（重复组里每组保留一张，其余可删）

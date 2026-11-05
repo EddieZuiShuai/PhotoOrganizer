@@ -378,16 +378,24 @@ final class ContentAnalyzer {
         var hits: [String] = []
     }
 
-    /// 在图片里找发票二维码。
+    /// 一次扫码，同时回答两个问题：「是不是发票」和「有没有任意二维码」。
     ///
     /// 为什么值得单独做：纸质发票、电子发票上那枚码是机器印的，不像手写字那样
     /// 受光线和角度影响；而 `VNDetectBarcodes` 是毫秒级的，比 OCR 便宜一个数量级。
-    /// 命中就直接判定为发票，连读字都省了。
-    func invoiceQR(in image: UIImage) -> InvoiceInfo? {
-        guard let cgImage = image.cgImage else { return nil }
+    /// 命中发票就直接判定，连读字都省了。
+    ///
+    /// 1.5 之前这里只认发票：非发票的网址 / 名片 / WiFi 码被直接丢弃，等于「扫了但没扫」。
+    /// 现在把非发票的 payload 也带回来，交给上层归成「二维码」，扫描次数不变，只是结果多用一次。
+    struct QRScan {
+        var invoice: InvoiceInfo?
+        var payload: String?
+    }
+
+    func scanQR(in image: UIImage) -> QRScan {
+        guard let cgImage = image.cgImage else { return QRScan() }
 
         let request = VNDetectBarcodesRequest()
-        // 只找发票/票据可能用的三种，不收 code128 之类，省时间也少误判
+        // 只找二维码类，不收 code128 之类，省时间也少误判
         request.symbologies = [.qr, .dataMatrix, .pdf417]
 
         let handler = VNImageRequestHandler(
@@ -398,15 +406,19 @@ final class ContentAnalyzer {
         do {
             try handler.perform([request])
         } catch {
-            return nil
+            return QRScan()
         }
 
-        guard let results = request.results else { return nil }
+        guard let results = request.results else { return QRScan() }
+        var generic: String?
         for obs in results {
             guard let payload = obs.payloadStringValue, !payload.isEmpty else { continue }
-            if let info = Self.parseInvoicePayload(payload) { return info }
+            if generic == nil { generic = payload }
+            if let info = Self.parseInvoicePayload(payload) {
+                return QRScan(invoice: info, payload: generic)
+            }
         }
-        return nil
+        return QRScan(invoice: nil, payload: generic)
     }
 
     /// 解析国标发票二维码。

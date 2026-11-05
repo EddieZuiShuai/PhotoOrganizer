@@ -22,7 +22,7 @@ name: 09 新手教程：我的 → 5 页翻到底 → 关闭
 - assertVisible: "点一下是选中.*"
 - tapOn:
     id: "tutorial-next"
-- assertVisible: "左滑是.*标记.*"
+- assertVisible: "左滑是.*待删.*"
 - tapOn:
     id: "tutorial-next"
 - assertVisible: "四个 tab.*"

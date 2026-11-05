@@ -357,13 +357,13 @@ struct TriageMedia: View {
     }
 }
 
-// MARK: - 滑动逐张过（左滑标记 / 右滑保留）
+// MARK: - 滑动逐张过（左滑待删 / 右滑保留）
 
 struct SwipeTriageView: View {
     let title: String
     let onFinish: (Set<String>) -> Void
-    /// 立即真删一张。列表那边负责落到系统相册并更新已删集合。
-    let onDeleteNow: (PhotoItem) -> Void
+    /// 批量真删所有已标记的。列表那边负责落到系统相册并更新已删集合。
+    let onDeleteMany: ([PhotoItem]) -> Void
 
     @Environment(\.dismiss) private var dismiss
 
@@ -379,7 +379,7 @@ struct SwipeTriageView: View {
     @State private var history: [Decision] = []
     @State private var marks: Set<String> = []
     @State private var hint: String?
-    @State private var confirmDelete: PhotoItem?
+    @State private var confirmBatchDelete = false
 
     private struct Decision {
         let id: String
@@ -396,11 +396,11 @@ struct SwipeTriageView: View {
         title: String,
         items: [PhotoItem],
         onFinish: @escaping (Set<String>) -> Void,
-        onDeleteNow: @escaping (PhotoItem) -> Void
+        onDeleteMany: @escaping ([PhotoItem]) -> Void
     ) {
         self.title = title
         self.onFinish = onFinish
-        self.onDeleteNow = onDeleteNow
+        self.onDeleteMany = onDeleteMany
         _list = State(initialValue: items)
     }
 
@@ -459,20 +459,14 @@ struct SwipeTriageView: View {
             TriageImageCache.shared.preload(upcoming(0, 4))
         }
         .confirmationDialog(
-            "立即删除这张？",
-            isPresented: Binding(
-                get: { confirmDelete != nil },
-                set: { if !$0 { confirmDelete = nil } }
-            ),
+            "删除已标记的 \(marks.count) 张？",
+            isPresented: $confirmBatchDelete,
             titleVisibility: .visible
         ) {
-            if let item = confirmDelete {
-                Button("删除这张", role: .destructive) {
-                    deleteNow(item)
-                    confirmDelete = nil
-                }
-                Button("只标记，先不删", role: .cancel) { confirmDelete = nil }
+            Button("删除 \(marks.count) 张", role: .destructive) {
+                deleteMany()
             }
+            Button("取消", role: .cancel) { }
         } message: {
             Text("直接从相册删除。30 天内在「最近删除」里可以恢复，但在这里没法撤销。")
         }
@@ -501,7 +495,7 @@ struct SwipeTriageView: View {
 
             Spacer()
 
-            Text(marks.isEmpty ? "左滑标记 · 右滑保留" : "已标 \(marks.count)")
+            Text(marks.isEmpty ? "左滑待删 · 右滑保留" : "待删 \(marks.count)")
                 .font(.system(size: 11, weight: .medium))
                 .foregroundColor(marks.isEmpty ? Color.white.opacity(0.55) : Color(red: 1, green: 0.45, blue: 0.4))
         }
@@ -563,7 +557,7 @@ struct SwipeTriageView: View {
                                 .accessibilityHidden(true)
                         }
                         .overlay(alignment: .topTrailing) {
-                            stamp("标记", color: Color(red: 0.96, green: 0.33, blue: 0.27))
+                            stamp("待删", color: Color(red: 0.96, green: 0.33, blue: 0.27))
                                 .opacity(isTop ? leftProgress : 0)
                                 .accessibilityHidden(true)
                         }
@@ -709,19 +703,22 @@ struct SwipeTriageView: View {
                         bg: Color.white.opacity(0.14), enabled: !history.isEmpty && !busy) {
                 undo()
             }
+            roundButton(icon: "flag.fill", label: "待删", key: "mark",
+                        bg: Color(red: 0.9, green: 0.5, blue: 0.15), enabled: !busy) {
+                commit(keep: false)
+            }
             roundButton(icon: "checkmark", label: "保留", key: "keep",
                         bg: Color(red: 0.2, green: 0.62, blue: 0.36), enabled: !busy) {
                 commit(keep: true)
             }
-            roundButton(icon: "bookmark.fill", label: "标记", key: "mark",
-                        bg: Color(red: 0.9, green: 0.5, blue: 0.15), enabled: !busy) {
-                commit(keep: false)
-            }
-            // 真删是唯一不可撤销的动作：单独一个按钮 + 单独一次确认，
-            // 和「标记」在颜色和位置上都要分得开。
-            roundButton(icon: "trash.fill", label: "删除", key: "delete-now",
-                        bg: Color(red: 0.72, green: 0.14, blue: 0.16), enabled: !busy) {
-                confirmDelete = list[index]
+            // 删除 = 一次性真删所有已标「待删」的，不可撤销，单独一次确认。
+            // 动态显示张数，一张都没标时置灰。
+            roundButton(icon: "trash.fill",
+                        label: marks.isEmpty ? "删除" : "删除 \(marks.count) 张",
+                        key: "delete-many",
+                        bg: Color(red: 0.72, green: 0.14, blue: 0.16),
+                        enabled: !marks.isEmpty && !busy) {
+                confirmBatchDelete = true
             }
         }
         .padding(.top, 6)
@@ -754,7 +751,7 @@ struct SwipeTriageView: View {
             } label: {
                 Text(list.isEmpty
                      ? "完成"
-                     : (marks.isEmpty ? "看完了，全部保留" : "完成，标记 \(marks.count) 张待删"))
+                     : (marks.isEmpty ? "看完了，全部保留" : "完成，待删 \(marks.count) 张"))
                     .font(.system(size: 16, weight: .semibold))
                     .foregroundColor(.white)
                     .frame(maxWidth: .infinity)
@@ -797,7 +794,7 @@ struct SwipeTriageView: View {
                 .font(.system(size: 20, weight: .semibold))
                 .foregroundColor(.white)
 
-            Text("看了 \(list.count) 张 · 标记删除 \(marks.count) 张")
+            Text("看了 \(list.count) 张 · 待删 \(marks.count) 张")
                 .font(.system(size: 13))
                 .foregroundColor(.white.opacity(0.7))
 
@@ -807,7 +804,7 @@ struct SwipeTriageView: View {
                     .foregroundColor(Color(red: 1, green: 0.55, blue: 0.45))
             }
 
-            Text("标记只是暂存，回到列表点红色按钮才会真正删除")
+            Text("中途随时点「删除 N 张」直接删；不删的话，点「完成」会把它们带回列表")
                 .font(.system(size: 11))
                 .foregroundColor(.white.opacity(0.45))
                 .multilineTextAlignment(.center)
@@ -863,24 +860,26 @@ struct SwipeTriageView: View {
         }
     }
 
-    /// 真删。删完这张从数组里拿掉，index 不动——后面的自动补上来。
-    private func deleteNow(_ item: PhotoItem) {
-        guard !busy else { return }
+    /// 批量真删所有已标记的。删完从数组里拿掉这些张，index 回退到正确位置。
+    private func deleteMany() {
+        guard !marks.isEmpty, !busy else { return }
         busy = true
         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
 
-        onDeleteNow(item)
-        marks.remove(item.id)
+        let toDelete = list.filter { marks.contains($0.id) }
+        let removed = toDelete.count
+        onDeleteMany(toDelete)
 
         var instant = Transaction()
         instant.disablesAnimations = true
         withTransaction(instant) {
-            if let at = list.firstIndex(where: { $0.id == item.id }) {
-                list.remove(at: at)
-                if at < index { index = max(0, index - 1) }
-            }
-            // 删掉一张之后，历史里的下标全错位了。撤销只对「标记」有意义，
-            // 这里直接清空，避免撤销把已经删掉的张又「飞回来」。
+            let ids = Set(toDelete.map { $0.id })
+            list.removeAll { ids.contains($0.id) }
+            marks.removeAll()
+            // 所有被删的都已经滑过去了（待删只能来自已经过目的张），
+            // 直接往回退 removed 位。
+            index = max(0, index - removed)
+            // 下标全错位，撤销只对「标记」有意义，清空避免撤销把已删的「飞回来」。
             history.removeAll()
             fly = nil
             drag = .zero
@@ -888,7 +887,7 @@ struct SwipeTriageView: View {
         }
 
         busy = false
-        showHint("已删除 1 张 · 30 天内可在「最近删除」恢复")
+        showHint("已删除 \(removed) 张 · 30 天内可在「最近删除」恢复")
         TriageImageCache.shared.preload(upcoming(index, 4))
     }
 

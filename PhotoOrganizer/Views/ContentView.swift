@@ -232,6 +232,13 @@ struct HomeView: View {
     @State private var permissionText: String = "未授权"
     @State private var permissionOK: Bool = false
 
+    /// 第一次用的人看不到教程入口（底部 tab 要扫描完才出现），
+    /// 所以在首页「开始扫描」下方补一张卡。看完教程后 seenVersion 会写，
+    /// 这张卡自动消失；X 只是本次会话隐藏，下次启动还会再出现，直到真的看一遍。
+    @AppStorage("tutorialSeenVersion") private var seenVersion: String = ""
+    @State private var showTutorial = false
+    @State private var hintCardHidden = false
+
     var body: some View {
         ScrollView {
             VStack(spacing: 18) {
@@ -290,6 +297,10 @@ struct HomeView: View {
                         .cornerRadius(12)
                 }
 
+                if !hintCardHidden && seenVersion != shortVersion {
+                    tutorialHintCard
+                }
+
                 Text("扫描不改动任何照片。删除一步生效，删掉的照片可在「最近删除」里 30 天内恢复。")
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
@@ -305,6 +316,9 @@ struct HomeView: View {
             .padding(20)
         }
         .onAppear(perform: loadInfo)
+        .sheet(isPresented: $showTutorial) {
+            TutorialView(hasScanned: photoCount > 0)
+        }
     }
 
     /// "版本 1.4（构建号 17）"——首页底部那行小字的数据源
@@ -313,6 +327,55 @@ struct HomeView: View {
         let short = info?["CFBundleShortVersionString"] as? String ?? "?"
         let build = info?["CFBundleVersion"] as? String ?? "?"
         return "版本 \(short)（构建号 \(build)）"
+    }
+
+    /// 教程状态用的是版本号（不是 Bool），这里只取短版本号来比对
+    private var shortVersion: String {
+        Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.5"
+    }
+
+    /// 首页第一次用的提示卡，放在「开始扫描」下方而不是上方——
+    /// 放上面会推动按钮位置，8 条 UI 用例的首屏步骤全要改。
+    private var tutorialHintCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("第一次用？")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.primary)
+                Spacer()
+                Button {
+                    hintCardHidden = true
+                } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundColor(.secondary)
+                        .frame(width: 24, height: 24)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("关闭提示")
+            }
+            Text("90 秒看懂：怎么扫、怎么删、左滑是什么意思。不挡扫描，随时能重看。")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button {
+                showTutorial = true
+            } label: {
+                Text("查看教程")
+                    .font(.system(size: 14, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 10)
+                    .background(Color(red: 0.18, green: 0.49, blue: 0.96))
+                    .cornerRadius(10)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("tutorial-home-card")
+        }
+        .padding(14)
+        .background(Color.white)
+        .cornerRadius(14)
     }
 
     private func statBox(title: String, value: String) -> some View {
@@ -408,7 +471,7 @@ struct ScanningView: View {
                 .font(.system(size: 13))
                 .foregroundColor(.secondary)
 
-            Text("先算重复和模糊，很快就能出结果\n发票和分类会在结果页后台继续，不耽误先看")
+            Text("先算重复和模糊，很快就能出结果\n内容分类会在结果页后台继续，不耽误先看")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -484,12 +547,10 @@ final class BlurIgnoreStore {
 
 struct ResultView: View {
     let result: AnalysisResult
-    /// 内容识别还在后台跑（发票、分类还没出来）
+    /// 内容识别还在后台跑（内容分类还没出来）
     let isRefining: Bool
     let refineStatus: RefineStatus
     let onRestart: () -> Void
-    /// 切到底部「空间」tab。header 上那个「空间」按钮用它。
-    let onOpenSpace: () -> Void
 
     /// 已删的照片。提到 MainTabView 里是因为「空间」tab 也要读它算释放量；
     /// 放在这里的话，切一次 tab 就丢了。
@@ -565,14 +626,12 @@ struct ResultView: View {
         refineStatus: RefineStatus = RefineStatus(),
         deletedIDs: Binding<Set<String>>,
         requestedTab: Binding<ResultTab?>,
-        onOpenSpace: @escaping () -> Void = {},
         onRestart: @escaping () -> Void
     ) {
         self.result = result
         self.isRefining = isRefining
         self.refineStatus = refineStatus
         self.onRestart = onRestart
-        self.onOpenSpace = onOpenSpace
         self._deletedIDs = deletedIDs
         self._requestedTab = requestedTab
         var map: [String: PhotoItem] = [:]
@@ -694,10 +753,10 @@ struct ResultView: View {
                     selectedIDs.formUnion(marks)
                     showToast("已标记 \(marks.count) 张，点下面红色按钮统一删除")
                 },
-                onDeleteNow: { item in
-                    // 逐张过里点「删除」= 真删。这里只负责落到相册，
+                onDeleteMany: { items in
+                    // 逐张过里点「删除 N 张」= 批量真删。这里只负责落到相册，
                     // 卡片自己会从列表里拿掉，不需要再回到结果页刷新。
-                    deleteItems([item])
+                    deleteItems(items)
                 }
             )
         }
@@ -801,10 +860,6 @@ struct ResultView: View {
         result.screenshotItems.filter { !deletedIDs.contains($0.id) && passes($0) }
     }
 
-    private var receiptCount: Int {
-        (result.categoryBuckets[.receipt] ?? []).filter { !deletedIDs.contains($0.id) && passes($0) }.count
-    }
-
     private func contentItems(_ category: ContentCategory) -> [PhotoItem] {
         (result.categoryBuckets[category] ?? []).filter { !deletedIDs.contains($0.id) && passes($0) }
     }
@@ -902,16 +957,13 @@ struct ResultView: View {
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 4)
-                headerButton(icon: "chart.pie.fill", text: "空间") { onOpenSpace() }
-                headerButton(icon: "line.3.horizontal.decrease", text: "筛选") { showFilter = true }
+                filterButton
             }
 
             HStack(spacing: 8) {
                 summaryItem(title: "建议清理", value: "\(suggested.count)", color: Color(red: 0.85, green: 0.25, blue: 0.2))
                 summaryItem(title: "重复组", value: "\(dupGroups.count)", color: Color(red: 0.85, green: 0.45, blue: 0.15))
-                // 内容识别没跑完之前，发票数还不知道——写 0 会被当成「又是 0 张发票」，
-                // 所以显式给一个「还没数完」的符号。
-                summaryItem(title: "发票", value: isRefining ? "…" : "\(receiptCount)", color: Color(red: 0.2, green: 0.55, blue: 0.4))
+                summaryItem(title: "相似组", value: "\(simGroups.count)", color: Color(red: 0.1, green: 0.5, blue: 0.65))
                 summaryItem(title: "截图", value: "\(shots.count)", color: Color(red: 0.4, green: 0.45, blue: 0.5))
             }
 
@@ -944,20 +996,25 @@ struct ResultView: View {
         .padding(.top, 8)
     }
 
-    private func headerButton(icon: String, text: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            HStack(spacing: 3) {
-                Image(systemName: icon)
-                    .font(.system(size: 10))
-                Text(text)
-                    .font(.system(size: 11, weight: .medium))
+    /// 筛选入口。原来和「空间」挤在一个 11 号字的小胶囊里，太不起眼；
+    /// 1.5 把「空间」拿掉（和底部 tab 重复），筛选单独放大成一颗整按钮。
+    private var filterButton: some View {
+        Button {
+            showFilter = true
+        } label: {
+            HStack(spacing: 6) {
+                Image(systemName: "line.3.horizontal.decrease")
+                    .font(.system(size: 14, weight: .semibold))
+                Text("筛选")
+                    .font(.system(size: 14, weight: .semibold))
             }
             .foregroundColor(blue)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 14)
+            .padding(.vertical, 8)
             .background(Capsule().fill(Color.white))
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("open-filter")
     }
 
     @ViewBuilder
@@ -1744,26 +1801,14 @@ struct ResultView: View {
             Divider()
 
             if selectedIDs.isEmpty {
-                HStack(spacing: 12) {
-                    Button(action: onRestart) {
-                        Text("重新扫描")
-                            .font(.system(size: 15))
-                            .foregroundColor(.primary)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13)
-                            .background(Color.black.opacity(0.05))
-                            .cornerRadius(10)
-                    }
-
-                    ShareLink(item: exportText()) {
-                        Text("导出清单")
-                            .font(.system(size: 15, weight: .medium))
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 13)
-                            .background(blue)
-                            .cornerRadius(10)
-                    }
+                Button(action: onRestart) {
+                    Text("重新扫描")
+                        .font(.system(size: 15))
+                        .foregroundColor(.primary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 13)
+                        .background(Color.black.opacity(0.05))
+                        .cornerRadius(10)
                 }
                 .padding(16)
             } else {
@@ -2001,75 +2046,11 @@ struct ResultView: View {
             }
         }
     }
-
-    private func exportText() -> String {
-        var lines: [String] = []
-        lines.append("相册整理清单")
-        lines.append("生成时间：" + DateFormatter.localizedString(from: Date(), dateStyle: .medium, timeStyle: .short))
-        lines.append("")
-        lines.append("照片总数：\(result.photoCount)")
-        lines.append("建议清理：\(suggested.count)")
-        lines.append("重复组：\(dupGroups.count)")
-        lines.append("相似组：\(simGroups.count)")
-        lines.append("模糊：\(blurry.count)")
-        lines.append("截图：\(shots.count)")
-
-        for category in ContentCategory.allCases where category != .other {
-            let n = contentItems(category).count
-            if n > 0 {
-                lines.append("\(category.rawValue)：\(n)")
-            }
-        }
-        lines.append("")
-
-        if !suggested.isEmpty {
-            lines.append("—— 建议清理（按可能性排序）——")
-            for item in suggested {
-                let reason = item.cleanupReasons.prefix(2).joined(separator: "；")
-                lines.append("  · \(item.displayName)  \(item.scorePercent)%  \(reason)")
-            }
-            lines.append("")
-        }
-
-        if !dupGroups.isEmpty {
-            lines.append("—— 重复组（原图文件完全相同）——")
-            for (i, g) in dupGroups.enumerated() {
-                lines.append("组 \(i + 1)（\(g.items.count) 张）")
-                for item in g.items {
-                    lines.append("  · \(item.displayName)  \(item.resolutionText)  \(item.sizeText)")
-                }
-            }
-            lines.append("")
-        }
-
-        if !simGroups.isEmpty {
-            lines.append("—— 相似组（内容接近，不完全相同）——")
-            for (i, g) in simGroups.enumerated() {
-                lines.append("组 \(i + 1)（\(g.items.count) 张）")
-                for item in g.items {
-                    lines.append("  · \(item.displayName)  \(item.resolutionText)")
-                }
-            }
-            lines.append("")
-        }
-
-        let receipts = contentItems(.receipt)
-        if !receipts.isEmpty {
-            lines.append("—— 发票票据 ——")
-            for item in receipts {
-                let hit = item.ocrHits.prefix(3).joined(separator: "/")
-                lines.append("  · \(item.displayName)  \(hit)")
-            }
-            lines.append("")
-        }
-
-        return lines.joined(separator: "\n")
-    }
 }
 
 // MARK: - 后台内容识别的进度条
 
-/// 结果页顶上那一条「正在识别发票与分类」。
+/// 结果页顶上那一条「正在识别分类」。
 ///
 /// 它自己订阅进度对象，所以百分比每变一次只重画这一行，
 /// 不会把下面两万多条的列表一起刷新。
@@ -2084,12 +2065,12 @@ struct RefineBanner: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(status.total > 0
-                     ? "正在识别发票与分类 \(status.percent)%（\(status.done)/\(status.total)）"
-                     : "正在识别发票与分类…")
+                     ? "正在识别分类 \(status.percent)%（\(status.done)/\(status.total)）"
+                     : "正在识别分类…")
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.primary)
 
-                Text("重复、相似、模糊已经算完，可以先动手；识别完会自动补上发票和分类")
+                Text("重复、相似、模糊已经算完，可以先动手；识别完会自动补上内容分类")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
                     .lineLimit(2)
@@ -2379,7 +2360,6 @@ struct MainTabView: View {
                 refineStatus: refineStatus,
                 deletedIDs: $deletedIDs,
                 requestedTab: $requestedTab,
-                onOpenSpace: { tab = .space },
                 onRestart: onRestart
             )
             .opacity(tab == .clean ? 1 : 0)
@@ -2552,6 +2532,7 @@ struct CategoryOverviewView: View {
     private func color(for category: ContentCategory) -> Color {
         switch category {
         case .receipt: return Color(red: 0.2, green: 0.55, blue: 0.4)
+        case .qrCode: return Color(red: 0.15, green: 0.45, blue: 0.6)
         case .document: return Color(red: 0.35, green: 0.45, blue: 0.55)
         case .screenshot: return Color(red: 0.4, green: 0.45, blue: 0.5)
         case .person: return Color(red: 0.85, green: 0.45, blue: 0.4)
@@ -2905,6 +2886,47 @@ struct SettingsTabView: View {
                     .buttonStyle(.plain)
                     .padding(.vertical, 12)
                     .accessibilityIdentifier("tutorial-open")
+
+                    divider
+
+                    Button {
+                        openMailFeedback()
+                    } label: {
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("邮件反馈")
+                                    .font(.system(size: 15))
+                                    .foregroundColor(.primary)
+                                Text("把问题和版本号一起发来，方便定位")
+                                    .font(.system(size: 11.5))
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 6)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .padding(.top, 3)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 12)
+                    .accessibilityIdentifier("settings-feedback")
+                }
+
+                // MARK: 常见问题
+                sectionTitle("常见问题")
+                card {
+                    faqRow(q: "扫描会上传我的照片吗？", a: "不会。所有识别都在手机本地完成：没有服务器、没有上传、没有账号。")
+                    divider
+                    faqRow(q: "「建议清理 80%」是什么意思？", a: "是可疑度，不是删除概率。80% 只表示同时命中了几个可疑特征，不代表八成该删。")
+                    divider
+                    faqRow(q: "删错了能找回吗？", a: "能。删除是删到系统「最近删除」，30 天内在照片 App 里可以恢复。")
+                    divider
+                    faqRow(q: "隐私分类为什么有误判？", a: "隐私是概率粗筛（排除人脸后的裸露密度），分不清泳装和内衣。它不进建议清理，全选也带不走。")
+                    divider
+                    faqRow(q: "第二次扫描为什么快？", a: "没改过的照片直接读上次结果（增量缓存），所以只要几十秒。")
                 }
 
                 // MARK: 系统权限
@@ -3049,6 +3071,23 @@ struct SettingsTabView: View {
         .padding(.vertical, 12)
     }
 
+    private func faqRow(q: String, a: String) -> some View {
+        DisclosureGroup {
+            Text(a)
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .padding(.top, 4)
+                .padding(.bottom, 8)
+                .padding(.trailing, 4)
+        } label: {
+            Text(q)
+                .font(.system(size: 15))
+                .foregroundColor(.primary)
+                .padding(.vertical, 8)
+        }
+    }
+
     // MARK: 行为
 
     private func refresh() {
@@ -3068,6 +3107,23 @@ struct SettingsTabView: View {
     private func openSystemSettings() {
         guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
         UIApplication.shared.open(url)
+    }
+
+    private func openMailFeedback() {
+        let version = appVersionLine()
+        var comps = URLComponents()
+        comps.scheme = "mailto"
+        comps.path = "eddie.wu@qq.com"
+        comps.queryItems = [
+            URLQueryItem(name: "subject", value: "PhotoOrganizer 反馈（\(version)）"),
+            URLQueryItem(name: "body", value: "\n\n\n——\n版本：\(version)")
+        ]
+        guard let url = comps.url else { return }
+        if UIApplication.shared.canOpenURL(url) {
+            UIApplication.shared.open(url)
+        } else {
+            showToast("没有配置邮件账户，可直接发到 eddie.wu@qq.com")
+        }
     }
 
     private func showToast(_ text: String) {

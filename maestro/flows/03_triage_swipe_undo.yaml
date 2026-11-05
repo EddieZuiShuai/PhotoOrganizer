@@ -5,7 +5,7 @@ name: 03 逐张过：首滑、连划、撤销
 - tapOn: "三列"
 
 - tapOn: "逐张过"
-- assertVisible: "左滑标记 · 右滑保留"
+- assertVisible: "左滑待删 · 右滑保留"
 # 张数取决于相册里有多少照片，这里只断言「停在第 1 张」
 - assertVisible: "1 / [0-9]+"
 - waitForAnimationToEnd
@@ -23,19 +23,19 @@ name: 03 逐张过：首滑、连划、撤销
 - tapOn:
     id: "triage-undo"
 - assertVisible: "1 / [0-9]+"
-- assertNotVisible: "已标 [0-9]+"
+- assertNotVisible: "待删 [0-9]+"
 
-# 「标记」按钮 → 标记计数 +1（build 20 把它从「删除」改名，真删是另一个按钮）
+# 「待删」按钮 → 计数 +1（build 20 从「删除」改名；1.5 起叫「待删」，批量删在另一个按钮）
 - tapOn:
     id: "triage-mark"
 - assertVisible: "2 / [0-9]+"
-- assertVisible: "已标 1"
+- assertVisible: "待删 1"
 
 # 按钮保留 → 继续前进，标记数不变
 - tapOn:
     id: "triage-keep"
 - assertVisible: "3 / [0-9]+"
-- assertVisible: "已标 1"
+- assertVisible: "待删 1"
 
 # 再撤销一次，回到第 2 张
 - tapOn:

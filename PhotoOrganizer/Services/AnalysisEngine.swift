@@ -469,12 +469,18 @@ final class AnalysisEngine {
                 if content.documentLike || item.isScreenshot {
                     qrTried += 1
                     let t2 = CFAbsoluteTimeGetCurrent()
-                    let info = ContentAnalyzer.shared.invoiceQR(in: thumb)
+                    let scan = ContentAnalyzer.shared.scanQR(in: thumb)
                     tQR += CFAbsoluteTimeGetCurrent() - t2
-                    if let info = info {
+                    if let info = scan.invoice {
                         qrHits += 1
                         out[i].category = .receipt
                         out[i].ocrHits = info.hits
+                        return
+                    }
+                    // 非发票二维码：只在「截图/文档/其他」这种弱分类上生效，
+                    // 不抢人物/美食/风景/宠物已经拿到的结论。
+                    if scan.payload != nil && out[i].category.isQRWeakCategory {
+                        out[i].category = .qrCode
                         return
                     }
                 }
@@ -490,12 +496,16 @@ final class AnalysisEngine {
                         bigCount += 1
 
                         let t3 = CFAbsoluteTimeGetCurrent()
-                        let info = ContentAnalyzer.shared.invoiceQR(in: big)
+                        let scan = ContentAnalyzer.shared.scanQR(in: big)
                         tQR += CFAbsoluteTimeGetCurrent() - t3
-                        if let info = info {
+                        if let info = scan.invoice {
                             qrHits += 1
                             out[i].category = .receipt
                             out[i].ocrHits = info.hits
+                            return
+                        }
+                        if scan.payload != nil && out[i].category.isQRWeakCategory {
+                            out[i].category = .qrCode
                             return
                         }
 
@@ -538,12 +548,16 @@ final class AnalysisEngine {
                             bigCount += 1
 
                             let t6 = CFAbsoluteTimeGetCurrent()
-                            let info = ContentAnalyzer.shared.invoiceQR(in: big)
+                            let scan = ContentAnalyzer.shared.scanQR(in: big)
                             tQR += CFAbsoluteTimeGetCurrent() - t6
-                            if let info = info {
+                            if let info = scan.invoice {
                                 qrHits += 1
                                 out[i].category = .receipt
                                 out[i].ocrHits = info.hits
+                                return
+                            }
+                            if scan.payload != nil && out[i].category.isQRWeakCategory {
+                                out[i].category = .qrCode
                                 return
                             }
 
@@ -560,7 +574,7 @@ final class AnalysisEngine {
             }
 
             if i % 20 == 0 || i == total - 1 {
-                progress?(i + 1, total, "正在识别发票与内容分类")
+                progress?(i + 1, total, "正在识别内容分类")
             }
             if i % 800 == 0 && i > 0 {
                 ScanCache.shared.flush()

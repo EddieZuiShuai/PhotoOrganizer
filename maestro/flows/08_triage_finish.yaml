@@ -15,12 +15,12 @@ name: 08 逐张过：连续标记后关掉，标记要带回列表
 - tapOn:
     id: "triage-mark"
 - assertVisible: "3 / [0-9]+"
-- assertVisible: "已标 2"
+- assertVisible: "待删 2"
 - takeScreenshot: 14_triage_mid
 - tapOn:
     id: "triage-keep"
 - assertVisible: "4 / [0-9]+"
-- assertVisible: "已标 2"
+- assertVisible: "待删 2"
 - tapOn:
     id: "triage-keep"
 - assertVisible: "5 / [0-9]+"
