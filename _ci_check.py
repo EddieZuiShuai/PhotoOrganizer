@@ -155,9 +155,9 @@ def main():
 
     base = os.path.join(OUT_DIR, "maestro-results")
     for rel, label, n in [
+        ("preflight/po-diag.txt", "缩略图自检", 60),
         ("preflight/launch.txt", "simctl 启动输出", 20),
-        ("preflight/hierarchy.txt", "Maestro 看到的界面元素", 90),
-        ("hierarchy.txt", "Maestro 看到的界面元素", 90),
+        ("preflight/hierarchy.txt", "Maestro 看到的界面元素", 4),
     ]:
         p = os.path.join(base, rel)
         if os.path.exists(p):

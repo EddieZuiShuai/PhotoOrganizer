@@ -76,10 +76,21 @@ jobs:
           echo "已导入 $(ls UITestFixtures/*.jpg | wc -l) 张测试照片"
 
           echo "== 预授权相册 =="
+          # 只能授 photos（完全访问）。
+          # 千万别再授 photos-add —— 那会把 TCC 记成「仅添加」，iOS 就会在启动时
+          # 弹「"相册整理" is requesting additional access / Keep Add Only」把整个界面挡住，
+          # 之后所有滚动和点击都会失败（上一轮就是这么挂的）。
           xcrun simctl privacy "$UDID" grant photos com.eddie.photoorganizer
           echo "grant photos rc=$?"
-          xcrun simctl privacy "$UDID" grant photos-add com.eddie.photoorganizer
-          echo "grant photos-add rc=$?"
+
+          # 先启动一次再授权：这版 runtime 上「没启动过就 grant」不会落库，
+          # App 读到的仍是 notDetermined，一点「开始扫描」就弹系统框。
+          xcrun simctl launch "$UDID" com.eddie.photoorganizer || true
+          sleep 3
+          xcrun simctl terminate "$UDID" com.eddie.photoorganizer || true
+          sleep 1
+          xcrun simctl privacy "$UDID" grant photos com.eddie.photoorganizer
+          echo "grant photos（启动后补授）rc=$?"
 
       - name: 安装 Maestro
         run: |
@@ -152,6 +163,8 @@ jobs:
           else
             echo "没生成 po-diag.txt（自检没跑起来）"
           fi
+          # 交回给 Maestro 之前先收干净，别让预检留下的进程/弹框干扰用例
+          xcrun simctl terminate "$UDID" com.eddie.photoorganizer 2>/dev/null || true
 
       - name: 跑 UI 用例
         id: test
