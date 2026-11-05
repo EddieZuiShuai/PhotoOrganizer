@@ -53,7 +53,7 @@ PhotoOrganizer/
     VideoCompressor.swift      视频转 720p
   Views/ContentView.swift      首页 / 扫描 / 结果页
   Views/DashboardView.swift    空间看板
-  Views/SwipeTriageView.swift  逐张过
+  Views/SwipeTriageView.swift  逐张过（含视频播放）
   Views/PhotoPreviewView.swift 大图与视频
 maestro/                       云端 UI 用例
 .github/workflows/build.yml    自动编译出包

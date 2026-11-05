@@ -552,6 +552,10 @@ struct ResultView: View {
     // 布局 / 模糊灵敏度 / 手动排除
     @AppStorage("resultLayoutMode") private var layoutRaw: Int = 3
     @AppStorage("blurSensitivity") private var blurLevel: Int = 1
+    /// 设置页里的两个开关。放在这里是因为「清理」页要用它们决定
+    /// 是否显示隐私页签、缩略图要不要糊；用 @AppStorage 才能跟着开关即时重绘。
+    @AppStorage("showPrivacyCategory") private var showPrivacyCategory: Bool = true
+    @AppStorage("blurPrivacyThumbnails") private var blurPrivacyThumbnails: Bool = false
     @State private var ignoredBlurIDs: Set<String> = BlurIgnoreStore.shared.all()
     @State private var lastLongPressAt: Date = .distantPast
 
@@ -696,6 +700,15 @@ struct ResultView: View {
                 }
             )
         }
+        .onChange(of: showPrivacyCategory) { show in
+            // 关掉开关时如果正好停在隐私页，退回到「建议清理」，
+            // 否则用户会看到一个已经从页签列表里消失的分类内容。
+            if !show {
+                if case .content(let c) = tab, c == .privacy {
+                    tab = .suggested
+                }
+            }
+        }
         .onChange(of: requestedTab) { value in
             guard let value = value else { return }
             tab = value
@@ -807,6 +820,9 @@ struct ResultView: View {
             list.append(.large)
         }
         for category in ContentCategory.allCases where category != .other {
+            // 设置里关掉「显示隐私分类」之后，这个页签整个不出现。
+            // 注意只影响展示：照片本身还在相册里，也没被动过。
+            if category == .privacy && !showPrivacyCategory { continue }
             let arr = contentItems(category)
             if !arr.isEmpty {
                 list.append(.content(category))
@@ -1439,7 +1455,7 @@ struct ResultView: View {
         let selected = selectedIDs.contains(item.id)
 
         return ZStack {
-            PhotoThumbView(asset: item.asset, blurred: PrivacyDisplay.blurThumbnails && item.category == .privacy)
+            PhotoThumbView(asset: item.asset, blurred: blurPrivacyThumbnails && item.category == .privacy)
 
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
@@ -1530,7 +1546,7 @@ struct ResultView: View {
     /// 方形缩略图 + 选中态（蓝底 + 白框 + 右下角勾）
     private func thumb(_ item: PhotoItem, size: CGFloat, selected: Bool) -> some View {
         ZStack(alignment: .bottomTrailing) {
-            PhotoThumbView(asset: item.asset, size: size, blurred: PrivacyDisplay.blurThumbnails && item.category == .privacy)
+            PhotoThumbView(asset: item.asset, size: size, blurred: blurPrivacyThumbnails && item.category == .privacy)
 
             if selected {
                 Rectangle()
@@ -2033,7 +2049,7 @@ struct SelectableThumb: View {
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            PhotoThumbView(asset: item.asset, size: size, blurred: PrivacyDisplay.blurThumbnails && item.category == .privacy)
+            PhotoThumbView(asset: item.asset, size: size, blurred: blurPrivacyThumbnails && item.category == .privacy)
 
             if isSelected {
                 Rectangle()
@@ -2092,10 +2108,6 @@ struct SelectableThumb: View {
 ///
 /// **当前关闭**：要逐张核对「隐私」组的误报（533 张），糊着看不清就没法判断。
 /// 校准完把这里改回 `true` 即可，三个调用点都不用动。
-enum PrivacyDisplay {
-    static let blurThumbnails = false
-}
-
 struct PhotoThumbView: View {
     let asset: PHAsset
     /// nil 表示铺满父容器（网格用）
@@ -2388,6 +2400,9 @@ struct CategoryOverviewView: View {
     let result: AnalysisResult
     let onOpen: (ContentCategory) -> Void
 
+    /// 和「清理」页读同一个键：这边关掉，那边页签也一起消失
+    @AppStorage("showPrivacyCategory") private var showPrivacyCategory: Bool = true
+
     private let columns = [GridItem(.adaptive(minimum: 150), spacing: 12)]
 
     var body: some View {
@@ -2403,7 +2418,7 @@ struct CategoryOverviewView: View {
                 .padding(.top, 6)
 
                 LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(ContentCategory.allCases) { category in
+                    ForEach(ContentCategory.allCases.filter { $0 != .privacy || showPrivacyCategory }) { category in
                         let items = result.categoryBuckets[category] ?? []
                         Button {
                             onOpen(category)
@@ -2463,61 +2478,266 @@ struct SettingsTabView: View {
     let onRestart: () -> Void
     let photoCount: Int
 
+    /// 两个隐私开关。用 @AppStorage 而不是本地 @State：
+    /// 「清理」页也要读同一个键，否则设置改完回去不生效。
+    @AppStorage("showPrivacyCategory") private var showPrivacyCategory: Bool = true
+    @AppStorage("blurPrivacyThumbnails") private var blurPrivacyThumbnails: Bool = false
+
+    @Environment(\.scenePhase) private var scenePhase
+
+    @State private var cacheBytes: Int64 = 0
+    @State private var permissionText: String = "未知"
+    @State private var confirmClearCache = false
+    @State private var toast: String?
+
+    private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
+
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 10) {
                 Text("我的")
                     .font(.system(size: 20, weight: .semibold))
                     .padding(.top, 6)
+                    .padding(.bottom, 2)
 
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(appVersionLine())
-                        .font(.system(size: 15, weight: .medium))
-                    Text("这次分析了 \(photoCount) 项（照片 + 视频）")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
+                // MARK: 显示与内容
+                sectionTitle("显示与内容")
+                card {
+                    toggleRow(
+                        icon: "eye.slash",
+                        title: "显示隐私分类",
+                        subtitle: "关掉后，隐私页签和分类卡片都不再出现。照片还在相册里，只是这里不展示。",
+                        isOn: $showPrivacyCategory
+                    )
+
+                    divider
+
+                    toggleRow(
+                        icon: "eye.slash.fill",
+                        title: "隐私分类模糊显示",
+                        subtitle: "打开后，隐私组的缩略图先糊掉，点开大图才看清。",
+                        isOn: $blurPrivacyThumbnails
+                    )
+                    .disabled(!showPrivacyCategory)
+                    .opacity(showPrivacyCategory ? 1 : 0.4)
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(16)
-                .background(Color.white)
-                .cornerRadius(14)
 
-                Button {
-                    onRestart()
-                } label: {
-                    Text("重新扫描")
-                        .font(.system(size: 15, weight: .medium))
-                        .foregroundColor(Color(red: 0.0, green: 0.48, blue: 1.0))
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 14)
-                        .background(Color.white)
-                        .cornerRadius(14)
+                // MARK: 数据与存储
+                sectionTitle("数据与存储")
+                card {
+                    infoRow(title: "扫描缓存", value: byteText(cacheBytes))
+                    divider
+                    Button {
+                        confirmClearCache = true
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("清除扫描缓存")
+                                    .font(.system(size: 15))
+                                    .foregroundColor(.primary)
+                                Text("下次扫描会重新分析所有照片，不会删任何照片")
+                                    .font(.system(size: 11.5))
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "trash")
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 12)
+                    .accessibilityIdentifier("settings-clear-cache")
+
+                    divider
+
+                    Button {
+                        onRestart()
+                    } label: {
+                        HStack {
+                            Text("重新扫描")
+                                .font(.system(size: 15))
+                                .foregroundColor(.primary)
+                            Spacer()
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 13))
+                                .foregroundColor(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 12)
+                    .accessibilityIdentifier("settings-rescan")
                 }
-                .buttonStyle(.plain)
-                .accessibilityIdentifier("settings-rescan")
 
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("关于这个 App")
-                        .font(.system(size: 14, weight: .medium))
-                    Text("所有识别都在手机本地完成：没有服务器、没有上传、没有账号。删掉的照片进系统「最近删除」，30 天内可以恢复。")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                // MARK: 系统权限
+                sectionTitle("系统权限")
+                card {
+                    infoRow(title: "相册权限", value: permissionText)
+                    divider
+                    Button {
+                        openSystemSettings()
+                    } label: {
+                        HStack {
+                            Text("去系统设置里修改")
+                                .font(.system(size: 15))
+                                .foregroundColor(blue)
+                            Spacer()
+                            Image(systemName: "arrow.up.forward.app")
+                                .font(.system(size: 13))
+                                .foregroundColor(blue)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 12)
+                    .accessibilityIdentifier("settings-open-permission")
                 }
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(16)
-                .background(Color.white)
-                .cornerRadius(14)
 
-                Text("判定口径：重复=原图哈希相同；相似=缩略图感知哈希接近；模糊=清晰度低于全库中位数；隐私=排除人脸后的裸露密度。误判永远会有，最终点删除的永远是你自己。")
+                // MARK: 关于
+                sectionTitle("关于")
+                card {
+                    infoRow(title: "版本", value: appVersionLine())
+                    divider
+                    infoRow(title: "这次分析", value: "\(photoCount) 项")
+                    divider
+                    infoRow(title: "照片处理", value: "全部在本机")
+                }
+
+                Text("所有识别都在手机本地完成：没有服务器、没有上传、没有账号。删掉的照片进系统「最近删除」，30 天内可以恢复。\n\n判定口径：重复=原图哈希相同；相似=缩略图感知哈希接近；模糊=清晰度低于全库中位数；隐私=排除人脸后的裸露密度。误判永远会有，最终点删除的永远是你自己。")
                     .font(.system(size: 11))
                     .foregroundColor(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                     .padding(.horizontal, 4)
+                    .padding(.top, 4)
+                    .padding(.bottom, 24)
             }
-            .padding(16)
+            .padding(.horizontal, 16)
         }
         .background(Color(red: 0.96, green: 0.96, blue: 0.97))
+        .onAppear(perform: refresh)
+        .onChange(of: scenePhase) { phase in
+            // 从系统设置改完权限回来，数字要跟着变
+            if phase == .active { refresh() }
+        }
+        .confirmationDialog(
+            "清除扫描缓存？",
+            isPresented: $confirmClearCache,
+            titleVisibility: .visible
+        ) {
+            Button("清除", role: .destructive) {
+                ScanCache.shared.clear()
+                refresh()
+                showToast("缓存已清除")
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("只会删掉本地的分析结果，不会删任何照片。下次扫描会从头分析一遍，可能要十几分钟。")
+        }
+        .overlay(alignment: .bottom) {
+            if let toast = toast {
+                Text(toast)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(Capsule().fill(Color.black.opacity(0.78)))
+                    .padding(.bottom, 24)
+                    .allowsHitTesting(false)
+            }
+        }
+    }
+
+    // MARK: 组件
+
+    private func sectionTitle(_ text: String) -> some View {
+        Text(text)
+            .font(.system(size: 12, weight: .semibold))
+            .foregroundColor(.secondary)
+            .padding(.leading, 4)
+            .padding(.top, 10)
+    }
+
+    private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        VStack(spacing: 0) {
+            content()
+        }
+        .padding(.horizontal, 14)
+        .background(Color.white)
+        .cornerRadius(14)
+    }
+
+    private var divider: some View {
+        Divider().padding(.leading, 38)
+    }
+
+    private func toggleRow(icon: String, title: String, subtitle: String, isOn: Binding<Bool>) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: icon)
+                .font(.system(size: 14))
+                .foregroundColor(.secondary)
+                .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 15))
+                    .foregroundColor(.primary)
+                Text(subtitle)
+                    .font(.system(size: 11.5))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 6)
+
+            Toggle("", isOn: isOn)
+                .labelsHidden()
+                .tint(blue)
+        }
+        .padding(.vertical, 12)
+    }
+
+    private func infoRow(title: String, value: String) -> some View {
+        HStack {
+            Text(title)
+                .font(.system(size: 15))
+            Spacer()
+            Text(value)
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+        }
+        .padding(.vertical, 12)
+    }
+
+    // MARK: 行为
+
+    private func refresh() {
+        cacheBytes = ScanCache.shared.diskUsage()
+
+        let status = PHPhotoLibrary.authorizationStatus(for: .readWrite)
+        switch status {
+        case .authorized: permissionText = "全部照片"
+        case .limited: permissionText = "仅选中的照片"
+        case .denied: permissionText = "已拒绝"
+        case .restricted: permissionText = "受限制"
+        case .notDetermined: permissionText = "未询问"
+        @unknown default: permissionText = "未知"
+        }
+    }
+
+    private func openSystemSettings() {
+        guard let url = URL(string: UIApplication.openSettingsURLString) else { return }
+        UIApplication.shared.open(url)
+    }
+
+    private func showToast(_ text: String) {
+        withAnimation(.easeOut(duration: 0.18)) { toast = text }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            withAnimation(.easeIn(duration: 0.2)) {
+                if toast == text { toast = nil }
+            }
+        }
     }
 }
 

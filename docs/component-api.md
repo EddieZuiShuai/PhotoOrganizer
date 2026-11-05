@@ -112,6 +112,10 @@ func analyze(image: UIImage, isScreenshot: Bool, allowOCR: Bool = true) -> Conte
 func ocrOnly(image: UIImage) -> (receiptHits: [String], docKeywordHit: Bool, textLength: Int)
 func invoiceQR(in image: UIImage) -> InvoiceInfo?
 static func parseInvoicePayload(_ raw: String) -> InvoiceInfo?
+func skinRatioOfImage(_ image: UIImage) -> Double          // 96×96 采样，亚毫秒，做隐私闸门
+func privacyScore(image: UIImage, skin: Double? = nil) -> Double
+static let privacyThreshold: Double                        // 0.42
+static func uprightCGImage(_ image: UIImage) -> CGImage?   // 把 EXIF 方向烤进像素
 ```
 
 **规矩**：全部同步、CPU 密集，只在 `AnalysisEngine` 的后台队列里调；不要在 View 里调。`stats` 是每张都跑的轻量函数，不要把 `classify` 混进去。
@@ -143,9 +147,13 @@ func compress(asset: PHAsset, completion: @escaping (Result<Outcome, Error>) -> 
 | `HomeView` / `ScanningView` / `ResultView` | `ContentView.swift` | 首页 / 进度 / 结果主界面 |
 | `RefineBanner` | `ContentView.swift` | 阶段二进度横幅 |
 | `SelectableThumb` / `PhotoThumbView` | `ContentView.swift` | 可选中缩略图 / 纯展示缩略图 |
-| `SpaceDashboardView` / `FilterSheet` | `DashboardView.swift` | 体积看板 / 时间段与相册筛选 |
-| `SwipeTriageView` / `TriageImage` | `SwipeTriageView.swift` | 逐张过主界面 / 卡片图 |
-| `TriageImageCache` / `TriageMetrics` | `SwipeTriageView.swift` | 预取缓存（30 张）/ 统一取图尺寸 |
+| `MainTabView` / `MainTabBar` / `MainTab` | `ContentView.swift` | 底部四 tab 容器 / 自绘 tab bar / 枚举（`key` 是 ASCII，供 Maestro） |
+| `CategoryOverviewView` / `SettingsTabView` | `ContentView.swift` | 分类总览 / 我的 |
+| `SpaceStats` | `ContentView.swift` | 体积统计单一口径（结果页与空间 tab 共用） |
+| `SpaceDashboardView` / `FilterSheet` | `DashboardView.swift` | 体积看板（tab 页，不再是 sheet）/ 时间段与相册筛选 |
+| `SwipeTriageView` / `TriageMedia` | `SwipeTriageView.swift` | 逐张过主界面 / 卡片媒体（照片 fit、视频可播） |
+| `TriageVideoBox` | `SwipeTriageView.swift` | 单卡片视频播放器，划走即停 |
+| `TriageImageCache` / `TriageMetrics` | `SwipeTriageView.swift` | 预取缓存（30 张，跳过视频）/ 统一取图尺寸 |
 | `PhotoPreviewView` / `ZoomableImageView` / `VideoPlaybackModel` | `PhotoPreviewView.swift` | 大图 / 缩放 / 视频播放 |
 
 ### 单例与持久化
@@ -153,7 +161,7 @@ func compress(asset: PHAsset, completion: @escaping (Result<Outcome, Error>) -> 
 | 名字 | 存储 | 说明 |
 |---|---|---|
 | `BlurIgnoreStore.shared` | `UserDefaults["blurIgnoredIDs"]` | 手动排除的模糊照片 id，上限 5000 |
-| `TriageImageCache.shared` | `NSCache`（countLimit 30） | 逐张过图片缓存 |
+| `TriageImageCache.shared` | `NSCache`（countLimit 30） | 逐张过图片缓存；视频不走这里（封面单独取） |
 | `ScreenAwake.shared` | 运行时 | 引用计数式屏幕常亮，`setScanning` / `setAppActive` 两个开关 |
 
 ## 新增功能的推荐改法

@@ -218,7 +218,10 @@ final class ContentAnalyzer {
 
         for obs in req.results ?? [] {
             for label in obs.labels where label.confidence >= 0.5 {
-                if label.identifier == VNAnimalIdentifierDog || label.identifier == VNAnimalIdentifierCat {
+                // VNAnimalIdentifier 是个 RawRepresentable 结构体，不是 String，
+                // 直接和 label.identifier 比较编译不过，要取 rawValue。
+                if label.identifier == VNAnimalIdentifierDog.rawValue
+                    || label.identifier == VNAnimalIdentifierCat.rawValue {
                     return true
                 }
             }

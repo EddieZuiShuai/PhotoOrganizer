@@ -1123,6 +1123,42 @@ final class ScanCache {
         return e
     }
 
+    // MARK: 查询 / 清理
+
+    /// 缓存占用的字节数（全量 base + 增量日志）。
+    /// 设置页要显示这个数，让用户知道「清缓存」到底能清掉多少。
+    func diskUsage() -> Int64 {
+        var total: Int64 = 0
+        let fm = FileManager.default
+        for url in [baseURL, deltaURL].compactMap({ $0 }) {
+            if let attrs = try? fm.attributesOfItem(atPath: url.path),
+               let size = attrs[.size] as? NSNumber {
+                total += size.int64Value
+            }
+        }
+        return total
+    }
+
+    /// 清空缓存。**不删任何照片**，只是下次扫描要重新分析一遍。
+    ///
+    /// 注意 `loaded` 保持 true：清完之后如果马上重扫，`loadIfNeeded()` 不该再去读
+    /// 已经被删掉的文件——空字典正好让每一张都走"没命中"的分支。
+    func clear() {
+        let fm = FileManager.default
+        for url in [baseURL, deltaURL].compactMap({ $0 }) {
+            try? fm.removeItem(at: url)
+        }
+
+        lock.lock()
+        map.removeAll()
+        dirty.removeAll()
+        deltaBatches = 0
+        deltaBytes = 0
+        lock.unlock()
+
+        NSLog("[PhotoOrganizer][Scan] 扫描缓存已清空")
+    }
+
     // MARK: 写
 
     func store(_ item: PhotoItem, asset: PHAsset) {

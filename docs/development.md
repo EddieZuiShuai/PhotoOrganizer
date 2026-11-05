@@ -43,7 +43,7 @@ python watch_build.py --test     # 只测通知通道
 | 键 | 当前值 | 说明 |
 |---|---|---|
 | `CFBundleShortVersionString` | `1.4` | 对用户可见的版本 |
-| `CFBundleVersion` | `19` | 构建号，每次装到手机都要 +1，否则 Sideloadly 可能装不上/不覆盖 |
+| `CFBundleVersion` | `20` | 构建号，每次装到手机都要 +1，否则 Sideloadly 可能装不上/不覆盖 |
 
 > `project.pbxproj` 里的 `MARKETING_VERSION = 1.0` / `CURRENT_PROJECT_VERSION = 3` 是模板残留，**不起作用**（`INFOPLIST_FILE` 指向的 plist 里写了硬编码值，会覆盖它们）。别去改那里。
 

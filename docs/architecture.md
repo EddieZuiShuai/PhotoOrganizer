@@ -83,12 +83,30 @@ Models/
 | 减分：有人脸 | -0.25 | 同上 |
 | 文档（标签判定） | 人脸面积 ≥ 8% 或 ≥ 2 张脸 → 先判人物；否则需命中 `documentLabels` 且置信度 ≥ 0.5 | `ContentAnalyzer.category` |
 | 文档（关键词覆盖） | `docKeywords` 命中 **≥ 2 个** 且人脸面积 < 8% | `ContentAnalyzer.applyKeywords` |
-| 隐私粗筛 | 肤色占比 > 0.12 **且** 人体占比 > 0.10，两项相乘 × 3.2 ≥ 0.34 | `ContentAnalyzer.privacyScore` |
+| 隐私闸门 | 肤色占比 > 0.10 **或** 人脸面积 > 5% **或** 有脸 → 才跑人体分割 | `AnalysisEngine.contentPass` |
+| 隐私粗筛（v2） | **排除人脸后的裸露密度**：人体 mask 内、且不在人脸框（外扩 18%）里的肤色像素 ÷ 同一区域像素数，再乘 `min(1, 肤色像素占全图 ÷ 4%)`，≥ **0.42** 判隐私 | `ContentAnalyzer.privacyScore` |
+| 隐私（v1，已废弃） | 肤色占比 × 人体占比 × 3.2 ≥ 0.34。自拍同时踩中两个因子，必然过线 | — |
 | 隐私不参与打分 | `category == .privacy` 直接跳过 `buildScores`，也不进 `suggestedItems` | `AnalysisEngine.buildScores` |
-| 隐私缩略图打码 | **当前关闭**：`PrivacyDisplay.blurThumbnails = false`，为了逐张核对 533 张误报。改回 `true` 即恢复，三个调用点不用动 | `ContentView.PrivacyDisplay` |
+| 隐私缩略图打码 | **当前关闭**：`PrivacyDisplay.blurThumbnails = false`，为了逐张核对误报。改回 `true` 即恢复，三个调用点不用动 | `ContentView.PrivacyDisplay` |
+| 宠物 | 场景标签里有 dog/cat/pet/animal → 补跑 `VNRecognizeAnimalsRequest`，命中 Dog/Cat 且 conf ≥ 0.5 → 直接判宠物（排在美食/风景之前） | `ContentAnalyzer.detectAnimal` |
 | 增量命中 | `localIdentifier` 相同 **且** `abs(modificationDate 差) ≤ 1s` | `ScanCache.hit` |
 
 `cleanupScore` 是这些加减分的累加，界面显示为百分比。它表示"综合可疑度"，不是"删除概率"。
+
+### 隐私判定为什么改了两次
+
+| 版本 | 公式 | 错在哪 |
+|---|---|---|
+| v1（1.4/18–19） | `肤色占比 × 人体占比 × 3.2 ≥ 0.34` | 两个因子在自拍上同时偏高：脸是画面里最大的一块皮肤；`VNGeneratePersonSegmentation` 给的是**整个人（含衣服）**的轮廓。普通半身照轻松算出 0.4+，于是"隐私组里全是人像" |
+| v2（1.4/20） | `裸露密度 × 绝对量系数 ≥ 0.42` | 仍需真机校准阈值，但结构上不再受"人占画面多大"影响 |
+
+v2 的三个关键点：
+
+1. **排除人脸**。`VNDetectFaceRectangles` 拿框后外扩 18%（Vision 的脸框只包五官，额头/下巴/脖子还在框外），统计时整块跳过。
+2. **用比值而不是乘积**。`人体区域内非脸部分的肤色像素 ÷ 同一区域像素总数`——穿衣服的人分母含衣服，密度低；裸露躯干分子接近分母，密度高。
+3. **方向必须先归一化**。肤色统计是自己拿 `CGContext` 画像素，如果不处理 `imageOrientation`，读到的就是未旋转的原始像素，而 Vision 的人脸框/mask 是按 orientation 校正后的坐标。竖拍照片两边差 90°，"排除人脸"会排到画面边上。见 `ContentAnalyzer.uprightCGImage`。
+
+一个必须接受的限制：这套算法分不清泳装和内衣，也分不清"婴儿洗澡"和成人。它只能回答"裸露皮肤多不多"，回答不了"该不该藏起来"。
 
 ## 内存与稳定性
 

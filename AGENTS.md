@@ -14,7 +14,7 @@
 | 技术栈 | SwiftUI + Photos + Vision，少量 UIKit；**无第三方依赖、无 SPM** |
 | 规模 | 10 个 Swift 文件约 6.4k 行；最大是 `Views/ContentView.swift`（约 2.3k 行） |
 | Bundle ID | `com.eddie.photoorganizer` |
-| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.4 / 18**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
+| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.4 / 20**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
 | 怎么编译 | **没有 Mac。** push 到 `main` → GitHub Actions `build.yml` → 下载 ipa → Windows 上用 Sideloadly 签名安装 |
 | 怎么测 | Maestro 云端 UI 用例 8 条（`maestro/flows/`），手动触发 `ui-test.yml`，本机用 `_ci_check.py` 取回结论 |
 
@@ -74,7 +74,9 @@
 - 结果页卡顿 → 高频进度不要放 `@State`，用 `RefineStatus` 单独订阅
 - **改按钮文案导致 UI 用例整批失败** → Maestro 的 `tapOn: "文字"` 是全字匹配；「取消」改成「取消选中 N 张」后 4 条 flow 全挂。新按钮给 `accessibilityIdentifier`，用例写 `tapOn: { id: ... }`
 - **增量扫描很"快"但后台烧 CPU** → `flush()` 无条件全量编码（5.5 MB × 28 次）；只编码 dirty、增量日志追加，全命中时一次都不写
+- **底部 tab 不能用系统 `TabView`** → 切走就销毁页面，`selectedIDs`/滚动位置/筛选全丢。用四页常驻 + `opacity`；`bottomArea` 必须是 `safeAreaInset` 不是 `overlay`，否则压在 tab bar 上
+- **隐私判定先排除人脸再算密度** → 旧公式「肤色 × 人体」在自拍上必然过线；且肤色统计要先用 `uprightCGImage` 把 EXIF 方向烤进像素，否则竖拍照片的「排除人脸」会排到画面边上
 
 ## 当前版本
 
-`1.4 (19)`，增量扫描 / 断点续扫 / 文档判定顺序 / 隐私分组已上线；19 修了缓存落盘的 CPU 写放大，并临时关掉隐私缩略图打码以便校准误报。
+`1.4 (20)`：底部四 tab（清理/分类/空间/我的）、左右滑完整显示 + 内置视频播放 + 标记与删除拆开、隐私判定 v2（排除人脸 + 裸露密度）、宠物专用模型。19 修了缓存落盘的 CPU 写放大，并临时关掉隐私缩略图打码以便校准误报（20 仍关闭）。
