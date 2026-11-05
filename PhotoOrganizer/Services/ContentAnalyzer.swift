@@ -578,6 +578,14 @@ final class ContentAnalyzer {
     /// 判定线。改这个数之前先看 `docs/architecture.md` 的「隐私」一节。
     static let privacyThreshold: Double = 0.42
 
+    /// 躯干闸门（v3）。人体区域里，「不在脸上」的那部分至少占这么多，
+    /// 才承认「这张有人体可比」。低于它就是头像照 / 证件照 / 只露头。
+    ///
+    /// 0.32 的来历：脸框外扩 18% 之后，
+    /// 头像照通常只剩 20%~28%（脖子＋一点肩膀）→ 挡掉；
+    /// 自拍半身照约 0.45~0.55 → 放行；裸露躯干 0.6 以上 → 放行。
+    static let torsoRatioFloor: Double = 0.32
+
     /// 便宜的闸门：只算肤色占比（96×96 采样，亚毫秒级），用来决定要不要跑人体分割。
     ///
     /// 为什么要单独暴露：v1 只在「有脸」时才做隐私判定，于是**没露脸的身体照永远进不了隐私组**——
@@ -626,6 +634,12 @@ final class ContentAnalyzer {
     /// 比值天然不怕「人占画面多大」——这正是 v1 用乘法姿势时最容易被放大的地方。
     /// 再乘一个绝对量系数兜底：只有一只手在画面角落时，密度再高也不算。
     ///
+    /// v3（1.5）补一条**躯干闸门**，治「只露头」的照片：
+    /// 头像照整张人就是一个头，外扩后的脸框几乎吃掉整个人体 mask，剩下的只有脖子那一圈。
+    /// 分子分母都很小时比值反而更高，v2 会把证件照判成隐私。
+    /// 现在要求「脸以外的人体」至少占人体的 32%，否则直接 0——没有躯干可比，
+    /// 密度这个指标就不成立。详见 `torsoRatioFloor`。
+    ///
     /// 全程在本机算，不保存中间图、不上传、不进日志。
     func privacyScore(image: UIImage, skin: Double? = nil) -> Double {
         guard let cgImage = Self.uprightCGImage(image) else { return 0 }
@@ -661,13 +675,25 @@ final class ContentAnalyzer {
             }
         }
 
+        // ⑥ 躯干闸门：人体区域里必须有一块像样的、不属于头的地方。
+        //
+        //    这是 v3 补的，专治「头像照 / 证件照 / 只露头」被判成隐私——
+        //    这类照片整张人就是一个头，外扩 18% 的脸框几乎把人体 mask 全吃掉，
+        //    剩下的只有脖子和耳朵那一圈。分子分母都很小的时候，比值反而极高
+        //    （一圈脖子占那一圈的 80%），v2 的密度公式照样能顶到 0.6 以上。
+        //    真实含义是「他没穿衣服」吗？不是，是「这张照片只有头」。
+        //    没有躯干可比的时候，密度这个指标本身就没有意义，直接判 0。
+        let outsideFace = Double(denom) / Double(max(1, bodyPixels))
+        guard outsideFace >= Self.torsoRatioFloor else { return 0 }
+
         // 人被裁得只剩一只手：分母太小，密度没有统计意义
         guard denom >= (side * side) / 40 else { return 0 }
 
         let density = Double(skinInBody) / Double(denom)
         let absolute = Double(skinInBody) / Double(side * side)
-        // 4% 画面 ≈ 一块躯干的下限；低于它按比例打折，避免「局部放大」骗过阈值
-        let sizeFactor = min(1, absolute / 0.04)
+        // 5% 画面 ≈ 一块躯干的下限；低于它按比例打折，避免「局部放大」骗过阈值。
+        // 1.5 从 4% 提到 5%：脖子＋锁骨的近景很容易占到 4%，正好卡在旧阈值上。
+        let sizeFactor = min(1, absolute / 0.05)
         return min(1, density * sizeFactor)
     }
 

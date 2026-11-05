@@ -15,9 +15,11 @@ final class AnalysisEngine {
     static let shared = AnalysisEngine()
     private init() {}
 
-    /// 模糊判定：现在的口径是「和本相册的中位清晰度比」，
-    /// 这个绝对值只作为兜底（低于它的任何照片都不算清晰）。
-    var blurThreshold: Double = 25.0
+    // 1.5 删掉了 `blurThreshold`。它从 1.4 起就是死代码：全项目零引用，
+    // 但名字看起来像「模糊阈值开关」，改它毫无效果——这种变量留着只会误导人。
+    // 真正生效的绝对阈值硬编码在 `buildScores` 里（180 / 290），
+    // 相对阈值走「本相册中位清晰度」，两者都在 `docs/architecture.md` 有表。
+
     /// 相似阈值：dHash 汉明距离小于等于此值判为相似
     var similarDistance: Int = 8
     /// 「完全重复」的候选预筛距离：只有哈希非常接近的才会去核对原图字节
@@ -104,6 +106,17 @@ final class AnalysisEngine {
         var cacheHits = 0
 
         ScanCache.shared.loadIfNeeded()
+
+        // 隐私判定换过口径就作废旧的隐私结论，见 ScanCache.resetPrivacyJudgements。
+        // 用 UserDefaults 记一个模型版本号：只跑一次，之后每次扫描不再动。
+        // 不放进 ScanCache.version：那个一加就把两万条全作废，用户要重扫十几分钟。
+        let modelKey = "privacyModelVersion"
+        let currentModel = 3
+        if UserDefaults.standard.integer(forKey: modelKey) < currentModel {
+            let n = ScanCache.shared.resetPrivacyJudgements()
+            UserDefaults.standard.set(currentModel, forKey: modelKey)
+            NSLog("[PhotoOrganizer][Scan] 隐私口径升级到 v%ld，作废 %ld 条旧结论", currentModel, n)
+        }
 
         for (index, asset) in assets.enumerated() {
             let isVideo = (asset.mediaType == .video)
@@ -287,13 +300,21 @@ final class AnalysisEngine {
             return !item.isVideo && item.isScreenshot
         }
         result.suggestedItems = scored
-            .filter { !$0.isVideo && !$0.isFavorite && $0.cleanupScore >= 0.5 && $0.category != .privacy }
+            .filter { !$0.isVideo && !$0.isFavorite && $0.cleanupScore >= 0.5 && !$0.category.isPrivacy }
             .sorted { $0.cleanupScore > $1.cleanupScore }
 
         // 内容没跑完就不出分类：否则「其他 22066」会像 bug 一样挂在结果页上
         if contentReady {
             var buckets: [ContentCategory: [PhotoItem]] = [:]
-            for item in scored where !item.isVideo {
+            for item in scored {
+                if item.isVideo {
+                    // 视频只认隐私这一类。其余分类（发票 / 文档 / 截图）对视频没有意义，
+                    // 放进去只会让「其他」变成一堆视频。
+                    if item.category == .privacyVideo {
+                        buckets[.privacyVideo, default: []].append(item)
+                    }
+                    continue
+                }
                 buckets[item.category, default: []].append(item)
             }
             result.categoryBuckets = buckets
@@ -303,6 +324,34 @@ final class AnalysisEngine {
     }
 
     // MARK: - 阶段 3：内容识别
+
+    /// 视频的隐私得分：封面帧优先，判不出来再补两帧。
+    ///
+    /// 为什么不是「每段视频都抽三帧」：视频在库里是少数（22k 里 588 个），
+    /// 但每次解码 20~50 ms，全量抽三帧就是一分多钟，而这些时间绝大多数花在
+    /// 不可能命中的猫片和娃的日常上。所以先用封面做一次几乎免费的闸门：
+    /// 封面连肤色都没有，就不再花后面两次解码。
+    ///
+    /// 代价：片头是黑场、后面才出现画面的那极少数视频会漏。
+    /// 这个取舍写在 `docs/architecture.md` 的「隐私视频」一节，要改先改文档。
+    private func privacyScoreForVideo(asset: PHAsset) -> Double? {
+        let library = PhotoLibraryService.shared
+        let analyzer = ContentAnalyzer.shared
+
+        guard let poster = library.thumbnail(for: asset, maxPixel: 320) else { return nil }
+        let posterSkin = analyzer.skinRatioOfImage(poster)
+        var best = analyzer.privacyScore(image: poster, skin: posterSkin)
+
+        if best < ContentAnalyzer.privacyThreshold && posterSkin > 0.06 {
+            for frame in library.privacyFrames(for: asset) {
+                let skin = analyzer.skinRatioOfImage(frame)
+                guard skin > 0.06 else { continue }
+                best = max(best, analyzer.privacyScore(image: frame, skin: skin))
+                if best >= ContentAnalyzer.privacyThreshold { break }
+            }
+        }
+        return best
+    }
 
     /// 场景分类 + 发票二维码 + OCR。
     ///
@@ -352,7 +401,6 @@ final class AnalysisEngine {
 
             autoreleasepool {
                 let item = out[i]
-                guard !item.isVideo else { return }
 
                 // 增量：这张上次已经认过（分类 / 二维码 / OCR 都跑完了），直接跳过。
                 // 它省掉的是整条链路上最贵的一段，第二次扫描就靠这个。
@@ -369,6 +417,23 @@ final class AnalysisEngine {
                 }
 
                 let asset = assets[i]
+
+                // 视频只做一件事：判断是不是隐私视频。
+                //
+                // 1.4 及更早这里是一句 `guard !item.isVideo else { return }`，
+                // 所以视频永远停在 `.other`、也永远进不了 classification 桶。
+                // 但隐私是唯一一个对视频同样成立的口径——它问的是
+                // 「画面里有没有裸露的人」，不需要读字、不需要场景语义。
+                // 其余分类（发票 / 文档 / 截图）对视频没有意义，不做。
+                if item.isVideo {
+                    if let score = privacyScoreForVideo(asset: asset) {
+                        out[i].privacyScore = score
+                        if score >= ContentAnalyzer.privacyThreshold {
+                            out[i].category = .privacyVideo
+                        }
+                    }
+                    return
+                }
 
                 let t0 = CFAbsoluteTimeGetCurrent()
                 guard let thumb = library.thumbnail(for: asset, maxPixel: 320) else { return }
@@ -558,7 +623,8 @@ final class AnalysisEngine {
             // 隐私类不参与清理打分。
             // 它的判定是概率性的，混进「建议清理」等于让用户顺手删掉不该删的东西；
             // 重复组的加分在上面那段已经算过，那是另一回事（真的重复）。
-            if item.category == .privacy { continue }
+            // 1.5 起这一类有两个成员（照片 / 视频），所以走 isPrivacy 而不是比某个 case。
+            if item.category.isPrivacy { continue }
 
             // 模糊：只和「本相册自己的中位清晰度」比，避免不同机型/光线条件误伤。
             // 绝对值再卡一道，和界面「标准」档保持一致，免得建议清理里塞进一堆其实还行的照片。
@@ -1003,7 +1069,9 @@ struct CachedPhoto: Codable {
         item.isLowDetail = isLowDetail
         item.brightness = brightness
         item.edgeDensity = edgeDensity
-        item.category = ContentCategory(rawValue: categoryRaw) ?? .other
+        // fromCache 而不是 rawValue：1.4 存的是 "隐私"，1.5 改名叫 "隐私照片"，
+        // 直接查表会失败退回 .other，把已判出的隐私照片变成「其他」且永不重判。
+        item.category = ContentCategory.fromCache(categoryRaw)
         item.contentTags = contentTags
         item.ocrHits = ocrHits
         item.faceCount = faceCount
@@ -1140,6 +1208,35 @@ final class ScanCache {
     }
 
     // MARK: 写
+
+    /// 一次性口径迁移：把旧的隐私结论放回「未识别」。
+    ///
+    /// 为什么需要：1.5 换了隐私公式（v3 加躯干闸门），但缓存里那些条目
+    /// `contentDone` 已经是 true。不主动作废的话，内容识别会整段跳过它们，
+    /// 「只露头的照片仍然留在隐私组」——用户想要的修复永远不会生效。
+    ///
+    /// 只动隐私这一类（正常几十到几百条，重判约一分钟），
+    /// 不动 `version`，所以其他两万条缓存照常命中。
+    @discardableResult
+    func resetPrivacyJudgements() -> Int {
+        lock.lock()
+        var touched = 0
+        for (key, entry) in map {
+            // "隐私" 是 1.4 的旧类名，1.5 改成了 "隐私照片"，两个都要认
+            guard entry.categoryRaw == ContentCategory.privacy.rawValue
+                    || entry.categoryRaw == "隐私" else { continue }
+            var next = entry
+            next.contentDone = false
+            next.privacyScore = 0
+            map[key] = next
+            dirty[key] = next
+            touched += 1
+        }
+        lock.unlock()
+
+        if touched > 0 { flush() }
+        return touched
+    }
 
     func store(_ item: PhotoItem, asset: PHAsset) {
         let entry = CachedPhoto(item: item, asset: asset)

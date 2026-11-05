@@ -595,6 +595,7 @@ struct ResultView: View {
             header
             chips
             filterBar
+            triageBar
             toolbar
 
             ScrollView {
@@ -701,10 +702,11 @@ struct ResultView: View {
             )
         }
         .onChange(of: showPrivacyCategory) { show in
-            // 关掉开关时如果正好停在隐私页，退回到「建议清理」，
+            // 关掉开关时如果正好停在某个隐私页，退回到「建议清理」，
             // 否则用户会看到一个已经从页签列表里消失的分类内容。
+            // 1.5 起隐私有两页（照片 / 视频），两个都要退。
             if !show {
-                if case .content(let c) = tab, c == .privacy {
+                if case .content(let c) = tab, c.isPrivacy {
                     tab = .suggested
                 }
             }
@@ -820,9 +822,9 @@ struct ResultView: View {
             list.append(.large)
         }
         for category in ContentCategory.allCases where category != .other {
-            // 设置里关掉「显示隐私分类」之后，这个页签整个不出现。
-            // 注意只影响展示：照片本身还在相册里，也没被动过。
-            if category == .privacy && !showPrivacyCategory { continue }
+            // 设置里关掉「显示隐私分类」之后，两个隐私页签（照片 / 视频）整个不出现。
+            // 注意只影响展示：文件本身还在相册里，也没被动过。
+            if category.isPrivacy && !showPrivacyCategory { continue }
             let arr = contentItems(category)
             if !arr.isEmpty {
                 list.append(.content(category))
@@ -902,7 +904,6 @@ struct ResultView: View {
                 Spacer(minLength: 4)
                 headerButton(icon: "chart.pie.fill", text: "空间") { onOpenSpace() }
                 headerButton(icon: "line.3.horizontal.decrease", text: "筛选") { showFilter = true }
-                headerButton(icon: "hand.draw.fill", text: "逐张过") { startTriage() }
             }
 
             HStack(spacing: 8) {
@@ -983,6 +984,55 @@ struct ResultView: View {
             .background(Capsule().fill(blue.opacity(0.1)))
             .padding(.horizontal, 16)
             .padding(.top, 4)
+        }
+    }
+
+    /// 逐张过：从右上角工具栏挪到列表上方，变成一条带张数的主入口。
+    ///
+    /// 为什么不做成第五个 tab（1.5 评估结论）：
+    /// 1. 它不是一个「栏目」，而是**对当前这份列表的动作**。放进 tab 之后，
+    ///    用户还得在 tab 里再选一次「过哪一类」，等于把刚选好的上下文扔掉重来。
+    /// 2. 底部 tab 的语义是「平级的几个世界」。逐张过和「清理」共用同一份数据、
+    ///    同一套筛选，它是清理的一种视图，不是第二个世界。
+    /// 3. 张数是这个入口最重要的信息（「过 3 张」和「过 800 张」是两件事），
+    ///    tab 图标放不下数字。
+    /// 所以保留在清理页，但升级成整行、带张数、带一行说明——从「隐藏小按钮」变成主路径。
+    @ViewBuilder
+    private var triageBar: some View {
+        let list = currentList()
+        if !list.isEmpty {
+            Button {
+                startTriage()
+            } label: {
+                HStack(spacing: 6) {
+                    Image(systemName: "hand.draw.fill")
+                        .font(.system(size: 12))
+                    Text("逐张过")
+                        .font(.system(size: 13, weight: .semibold))
+                    Text("\(list.count) 项")
+                        .font(.system(size: 13))
+                    Spacer(minLength: 4)
+                    Text("左右滑快速筛")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundColor(.secondary)
+                }
+                .foregroundColor(blue)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 9)
+                .background(Color.white)
+                .cornerRadius(10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 16)
+            .padding(.top, 6)
+            // Maestro 按文字点，而这一行里有三个 Text。给整行一个精确的 label，
+            // 用例里的 `tapOn: "逐张过"` 才能全字命中（改文案时记得同批改 flow）。
+            .accessibilityLabel("逐张过")
+            .accessibilityIdentifier("triage-start")
         }
     }
 
@@ -1297,7 +1347,7 @@ struct ResultView: View {
                             isSelected: selectedIDs.contains(item.id),
                             size: 96,
                             showsZoomBadge: true,
-                            blurred: blurPrivacyThumbnails && item.category == .privacy,
+                            blurred: blurPrivacyThumbnails && item.category.isPrivacy,
                             onOpen: { open(item, in: group.items) },
                             onToggle: { toggle(item.id) }
                         )
@@ -1456,7 +1506,7 @@ struct ResultView: View {
         let selected = selectedIDs.contains(item.id)
 
         return ZStack {
-            PhotoThumbView(asset: item.asset, blurred: blurPrivacyThumbnails && item.category == .privacy)
+            PhotoThumbView(asset: item.asset, blurred: blurPrivacyThumbnails && item.category.isPrivacy)
 
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
@@ -1530,6 +1580,27 @@ struct ResultView: View {
                     .padding(5)
             }
         }
+        // 网格布局下的「算清晰」。
+        // 1.4 的问题：这个按钮只存在于列表布局右侧，默认布局是三列，
+        // 于是「这张其实挺清晰」在网格里根本没有入口，用户以为没这功能。
+        // 放在左下角：右下角是选中勾，右上角是放大 + 720p，只剩这一块空着。
+        .overlay(alignment: .bottomLeading) {
+            if tab == .blurry {
+                Button {
+                    ignoreBlur(item)
+                } label: {
+                    Text("算清晰")
+                        .font(.system(size: 9, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(Capsule().fill(Color(red: 0.15, green: 0.55, blue: 0.35).opacity(0.92)))
+                }
+                .buttonStyle(.plain)
+                .padding(5)
+                .accessibilityIdentifier("cell-clear-blur-" + item.displayName)
+            }
+        }
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .onTapGesture { tapRow(item) }
@@ -1547,7 +1618,7 @@ struct ResultView: View {
     /// 方形缩略图 + 选中态（蓝底 + 白框 + 右下角勾）
     private func thumb(_ item: PhotoItem, size: CGFloat, selected: Bool) -> some View {
         ZStack(alignment: .bottomTrailing) {
-            PhotoThumbView(asset: item.asset, size: size, blurred: blurPrivacyThumbnails && item.category == .privacy)
+            PhotoThumbView(asset: item.asset, size: size, blurred: blurPrivacyThumbnails && item.category.isPrivacy)
 
             if selected {
                 Rectangle()
@@ -2315,13 +2386,10 @@ struct MainTabView: View {
             .allowsHitTesting(tab == .clean)
             .accessibilityHidden(tab != .clean)
 
-            CategoryOverviewView(result: result) { category in
-                requestedTab = .content(category)
-                tab = .clean
-            }
-            .opacity(tab == .categories ? 1 : 0)
-            .allowsHitTesting(tab == .categories)
-            .accessibilityHidden(tab != .categories)
+            CategoryOverviewView(result: result, deletedIDs: $deletedIDs)
+                .opacity(tab == .categories ? 1 : 0)
+                .allowsHitTesting(tab == .categories)
+                .accessibilityHidden(tab != .categories)
 
             SpaceDashboardView(
                 totalBytes: stats.totalBytes,
@@ -2402,40 +2470,60 @@ struct MainTabBar: View {
 
 struct CategoryOverviewView: View {
     let result: AnalysisResult
-    let onOpen: (ContentCategory) -> Void
+    @Binding var deletedIDs: Set<String>
 
-    /// 和「清理」页读同一个键：这边关掉，那边页签也一起消失
+    /// 和「清理」页读同一个键：这边关掉，那边的两个隐私页签也一起消失
     @AppStorage("showPrivacyCategory") private var showPrivacyCategory: Bool = true
 
     private let columns = [GridItem(.adaptive(minimum: 150), spacing: 12)]
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("按内容分类")
-                        .font(.system(size: 20, weight: .semibold))
-                    Text("点一张卡片，回到「清理」并只看这一类")
-                        .font(.system(size: 12))
-                        .foregroundColor(.secondary)
-                }
-                .padding(.top, 6)
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 14) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("按内容分类")
+                            .font(.system(size: 20, weight: .semibold))
+                        Text("点一张卡片，进这一类里逐张看、整批挑")
+                            .font(.system(size: 12))
+                            .foregroundColor(.secondary)
+                    }
+                    .padding(.top, 6)
 
-                LazyVGrid(columns: columns, spacing: 12) {
-                    ForEach(ContentCategory.allCases.filter { $0 != .privacy || showPrivacyCategory }) { category in
-                        let items = result.categoryBuckets[category] ?? []
-                        Button {
-                            onOpen(category)
-                        } label: {
-                            categoryCard(category, count: items.count, bytes: items.reduce(Int64(0)) { $0 + max(0, $1.fileSize) })
+                    LazyVGrid(columns: columns, spacing: 12) {
+                        ForEach(ContentCategory.allCases.filter { !$0.isPrivacy || showPrivacyCategory }) { category in
+                            let items = alive(category)
+                            NavigationLink(value: category) {
+                                categoryCard(
+                                    category,
+                                    count: items.count,
+                                    bytes: items.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
+                                )
+                            }
+                            .buttonStyle(.plain)
                         }
-                        .buttonStyle(.plain)
                     }
                 }
+                .padding(16)
             }
-            .padding(16)
+            .background(Color(red: 0.96, green: 0.96, blue: 0.97))
+            .toolbar(.hidden, for: .navigationBar)
+            // 1.5 之前这里是「点卡片 → 切到清理 tab」。那等于把用户扔到另一个
+            // 上下文里，而且回不去（分类 tab 已经不在栈上）。现在改成在这个
+            // tab 里往下推一层：iOS 的惯例是每个 tab 有自己的导航栈，
+            // 「返回」永远回到刚才那张卡片墙。
+            .navigationDestination(for: ContentCategory.self) { category in
+                CategoryDetailView(
+                    category: category,
+                    items: result.categoryBuckets[category] ?? [],
+                    deletedIDs: $deletedIDs
+                )
+            }
         }
-        .background(Color(red: 0.96, green: 0.96, blue: 0.97))
+    }
+
+    private func alive(_ category: ContentCategory) -> [PhotoItem] {
+        (result.categoryBuckets[category] ?? []).filter { !deletedIDs.contains($0.id) }
     }
 
     private func categoryCard(_ category: ContentCategory, count: Int, bytes: Int64) -> some View {
@@ -2471,7 +2559,221 @@ struct CategoryOverviewView: View {
         case .scenery: return Color(red: 0.25, green: 0.6, blue: 0.5)
         case .pet: return Color(red: 0.55, green: 0.42, blue: 0.3)
         case .privacy: return Color(red: 0.6, green: 0.35, blue: 0.6)
+        case .privacyVideo: return Color(red: 0.45, green: 0.35, blue: 0.62)
         case .other: return Color(red: 0.5, green: 0.5, blue: 0.55)
+        }
+    }
+}
+
+// MARK: - 分类详情（从分类卡片推一层进来）
+
+/// 在「分类」tab 里就地看这一类，不再跳到「清理」。
+///
+/// 为什么不做成一个独立 tab、也不用 sheet：
+/// - sheet 是「临时任务」，看完要关掉；用户在这里是**浏览一整类**，需要能往下滚很久；
+/// - 独立 tab 会让底部变成 5 项，而这一页在语义上就是「分类」的子页，不是平级栏目。
+/// 每个 tab 一个导航栈，是 iOS 从 iPhone OS 1.0 就在用的模型，返回永远回到卡片墙。
+struct CategoryDetailView: View {
+    let category: ContentCategory
+    let items: [PhotoItem]
+    @Binding var deletedIDs: Set<String>
+
+    @AppStorage("blurPrivacyThumbnails") private var blurPrivacyThumbnails: Bool = false
+
+    @State private var selected: Set<String> = []
+    @State private var previewTarget: PreviewTarget?
+    @State private var message: String?
+    @State private var toast: String?
+
+    private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
+
+    /// 3 列固定边长，和「清理」页三列布局用同一套算法，两边格子大小一致
+    private var cellSide: CGFloat {
+        let w = UIScreen.main.bounds.width
+        return max(60, (w - 24 - 12) / 3)
+    }
+
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.fixed(cellSide), spacing: 6), count: 3)
+    }
+
+    private var alive: [PhotoItem] {
+        items.filter { !deletedIDs.contains($0.id) }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 10) {
+                if category.isPrivacy {
+                    Text(privacyNote)
+                        .font(.system(size: 11.5))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(12)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(Color.white)
+                        .cornerRadius(10)
+                }
+
+                if alive.isEmpty {
+                    Text("这一类里没有内容了")
+                        .font(.system(size: 13))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 40)
+                } else {
+                    LazyVGrid(columns: columns, spacing: 6) {
+                        ForEach(alive) { item in
+                            SelectableThumb(
+                                item: item,
+                                isSelected: selected.contains(item.id),
+                                size: cellSide,
+                                showsZoomBadge: true,
+                                blurred: blurPrivacyThumbnails && category.isPrivacy,
+                                onOpen: { open(item) },
+                                onToggle: { toggle(item) }
+                            )
+                        }
+                    }
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.top, 8)
+            .padding(.bottom, 16)
+        }
+        .background(Color(red: 0.96, green: 0.96, blue: 0.97))
+        .navigationTitle(category.rawValue)
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                Button(selected.count == alive.count && !alive.isEmpty ? "取消全选" : "全选") {
+                    if selected.count == alive.count {
+                        selected.removeAll()
+                    } else {
+                        selected = Set(alive.map { $0.id })
+                    }
+                }
+                .font(.system(size: 14))
+                .accessibilityIdentifier("category-select-all")
+            }
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !selected.isEmpty {
+                deleteBar
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let toast = toast {
+                Text(toast)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 9)
+                    .background(Capsule().fill(Color.black.opacity(0.78)))
+                    .padding(.bottom, 22)
+                    .allowsHitTesting(false)
+            }
+        }
+        .alert("出错了", isPresented: Binding(
+            get: { message != nil },
+            set: { if !$0 { message = nil } }
+        )) {
+            Button("知道了", role: .cancel) { message = nil }
+        } message: {
+            Text(message ?? "")
+        }
+        .fullScreenCover(item: $previewTarget) { target in
+            PhotoPreviewView(
+                items: target.items,
+                startIndex: target.startIndex,
+                selectedIDs: $selected
+            ) { item in
+                delete([item])
+            }
+        }
+    }
+
+    private var privacyNote: String {
+        if category == .privacyVideo {
+            return "视频的判定和照片同一套口径：抽 1~3 帧，看人体区域里排除头部后还剩多少裸露皮肤。封面不含人像的视频不会补抽帧，所以片头是黑场的那种可能漏。这一组不进「建议清理」，全选也带不走。"
+        }
+        return "判定口径是「排除人脸之后、身体上还剩多少裸露皮肤」。只露头的照片、证件照不会进这一组。这一组不进「建议清理」，全选也带不走。"
+    }
+
+    private var deleteBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                selected.removeAll()
+            } label: {
+                Text("取消选中 \(selected.count) 项")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Button {
+                let chosen = alive.filter { selected.contains($0.id) }
+                delete(chosen)
+            } label: {
+                Text("删除 \(selected.count) 项")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 18)
+                    .padding(.vertical, 10)
+                    .background(Color(red: 0.85, green: 0.25, blue: 0.2))
+                    .cornerRadius(10)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("category-delete")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            Color.white
+                .overlay(alignment: .top) {
+                    Rectangle().fill(Color.black.opacity(0.07)).frame(height: 0.5)
+                }
+                .ignoresSafeArea(edges: .bottom)
+        )
+    }
+
+    // MARK: 行为
+
+    private func toggle(_ item: PhotoItem) {
+        if selected.contains(item.id) {
+            selected.remove(item.id)
+        } else {
+            selected.insert(item.id)
+        }
+    }
+
+    private func open(_ item: PhotoItem) {
+        let list = alive
+        guard let idx = list.firstIndex(where: { $0.id == item.id }) else { return }
+        previewTarget = PreviewTarget(items: list, startIndex: idx)
+    }
+
+    private func delete(_ chosen: [PhotoItem]) {
+        guard !chosen.isEmpty else { return }
+        PhotoLibraryService.shared.delete(assets: chosen.map { $0.asset }) { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    deletedIDs.formUnion(chosen.map { $0.id })
+                    selected.subtract(Set(chosen.map { $0.id }))
+                    showToast("已删除 \(chosen.count) 项 · 30 天内在「最近删除」可恢复")
+                } else {
+                    message = "删除失败：" + (error?.localizedDescription ?? "未知原因")
+                }
+            }
+        }
+    }
+
+    private func showToast(_ text: String) {
+        toast = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
+            if toast == text { toast = nil }
         }
     }
 }
@@ -2493,6 +2795,7 @@ struct SettingsTabView: View {
     @State private var permissionText: String = "未知"
     @State private var confirmClearCache = false
     @State private var toast: String?
+    @State private var showTutorial = false
 
     private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
 
@@ -2575,6 +2878,35 @@ struct SettingsTabView: View {
                     .accessibilityIdentifier("settings-rescan")
                 }
 
+                // MARK: 帮助与支持
+                sectionTitle("帮助与支持")
+                card {
+                    Button {
+                        showTutorial = true
+                    } label: {
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("新手教程")
+                                    .font(.system(size: 15))
+                                    .foregroundColor(.primary)
+                                Text("5 页，90 秒：扫描、读数字、选中、逐张过、四个 tab")
+                                    .font(.system(size: 11.5))
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 6)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .padding(.top, 3)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 12)
+                    .accessibilityIdentifier("tutorial-open")
+                }
+
                 // MARK: 系统权限
                 sectionTitle("系统权限")
                 card {
@@ -2621,6 +2953,9 @@ struct SettingsTabView: View {
         }
         .background(Color(red: 0.96, green: 0.96, blue: 0.97))
         .onAppear(perform: refresh)
+        .sheet(isPresented: $showTutorial) {
+            TutorialView(hasScanned: photoCount > 0)
+        }
         .onChange(of: scenePhase) { phase in
             // 从系统设置改完权限回来，数字要跟着变
             if phase == .active { refresh() }

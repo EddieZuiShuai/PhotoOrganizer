@@ -2,6 +2,7 @@ import Foundation
 import Photos
 import UIKit
 import CryptoKit
+import AVFoundation
 
 /// 负责与系统相册打交道：权限、取资产、取缩略图、算原图哈希、删除。
 final class PhotoLibraryService {
@@ -75,6 +76,39 @@ final class PhotoLibraryService {
     /// 列表用的大一点的缩略图
     func listThumbnail(for asset: PHAsset) -> UIImage? {
         return thumbnail(for: asset, maxPixel: 320)
+    }
+
+    /// 视频的隐私复核帧。
+    ///
+    /// 视频没有「一张图」：`thumbnail(for:)` 给的是封面（第一帧），
+    /// 而片头经常是黑场、标题卡、或者一段无人的环境镜头。
+    /// 只看封面会漏掉真正需要保护的画面，所以在封面判不出来时再补两帧。
+    ///
+    /// 为什么只补两帧：一次解码 320px 约 20~50 ms，两万张的库里 588 个视频
+    /// 全补一遍是 30~60 秒。抽 30% 和 65% 两个点，足够覆盖「整段是同一场景」的常见情况，
+    /// 又不会把内容识别的总时长翻倍。取景位置刻意避开片头片尾。
+    ///
+    /// `appliesPreferredTrackTransform` 必须开：竖拍视频的原始像素是横的，
+    /// 不转正的话肤色统计和 Vision 的人脸坐标会差 90°，等于把人脸算到画面外。
+    func privacyFrames(for asset: PHAsset, maxPixel: CGFloat = 320) -> [UIImage] {
+        guard asset.mediaType == .video else { return [] }
+        let duration = asset.duration
+        guard duration > 1.0 else { return [] }
+
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
+        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.4, preferredTimescale: 600)
+        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.4, preferredTimescale: 600)
+
+        var frames: [UIImage] = []
+        for ratio in [0.30, 0.65] {
+            let time = CMTime(seconds: duration * ratio, preferredTimescale: 600)
+            if let cg = try? generator.copyCGImage(at: time, actualTime: nil) {
+                frames.append(UIImage(cgImage: cg))
+            }
+        }
+        return frames
     }
 
     /// 给 OCR 用的清晰大图（同步、高质量、精确缩放）。

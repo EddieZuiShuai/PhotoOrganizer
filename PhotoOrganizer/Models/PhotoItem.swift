@@ -10,7 +10,8 @@ enum ContentCategory: String, CaseIterable, Identifiable {
     case food = "美食"
     case scenery = "风景"
     case pet = "宠物"
-    case privacy = "隐私"
+    case privacy = "隐私照片"
+    case privacyVideo = "隐私视频"
     case other = "其他"
 
     var id: String { rawValue }
@@ -25,8 +26,27 @@ enum ContentCategory: String, CaseIterable, Identifiable {
         case .scenery: return "mountain.2.fill"
         case .pet: return "pawprint.fill"
         case .privacy: return "eye.slash.fill"
+        case .privacyVideo: return "video.slash.fill"
         case .other: return "square.grid.2x2"
         }
+    }
+
+    /// 隐私类的判定是概率性的，走的是和别人不一样的路径：
+    /// 不进「建议清理」、支持缩略图打码、可以被设置里的开关整体关掉。
+    /// 1.5 把「隐私」拆成照片和视频两个类之后，所有特判都必须认这两个，
+    /// 所以统一收在这里，别再写 `== .privacy`。
+    var isPrivacy: Bool {
+        self == .privacy || self == .privacyVideo
+    }
+
+    /// 从缓存里还原。旧缓存存的是 `"隐私"`（1.4 及更早的类名），
+    /// 直接 `ContentCategory(rawValue:)` 会失败并退回 `.other`——
+    /// 那会让所有已经判出来的隐私照片在升级后变成「其他」，且 contentDone 已经是 true，
+    /// 永远不会重判。所以这里显式认一次旧名字。
+    static func fromCache(_ raw: String) -> ContentCategory {
+        if let value = ContentCategory(rawValue: raw) { return value }
+        if raw == "隐私" { return .privacy }
+        return .other
     }
 }
 

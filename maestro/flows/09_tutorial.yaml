@@ -1,0 +1,36 @@
+appId: com.eddie.photoorganizer
+name: 09 新手教程：我的 → 5 页翻到底 → 关闭
+---
+- runFlow: ../subflows/open_large.yaml
+
+# 1.5 起「我的」里多了一组「帮助与支持」，教程入口常驻
+- tapOn:
+    id: "tab-me"
+- assertVisible: "新手教程"
+- tapOn:
+    id: "tutorial-open"
+
+# 第 1 页：动作式标题
+- assertVisible: "先让它扫完，中途别锁屏"
+
+# 连点四下到第 5 页（最后一页按钮变成「开始扫描」或「知道了」）
+- tapOn:
+    id: "tutorial-next"
+- assertVisible: "百分比是.*"
+- tapOn:
+    id: "tutorial-next"
+- assertVisible: "点一下是选中.*"
+- tapOn:
+    id: "tutorial-next"
+- assertVisible: "左滑是.*标记.*"
+- tapOn:
+    id: "tutorial-next"
+- assertVisible: "四个 tab.*"
+
+# 最后一页收尾：翻到底才算看过，会写 tutorialSeenVersion
+- tapOn:
+    id: "tutorial-done"
+
+# 关掉之后回到「我的」，入口还在，可以重看
+- assertVisible: "新手教程"
+- takeScreenshot: 12_tutorial_done

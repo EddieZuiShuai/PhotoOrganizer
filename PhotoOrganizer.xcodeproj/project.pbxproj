@@ -16,6 +16,7 @@
 		1A0000000000000000000037 /* PhotoPreviewView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000028 /* PhotoPreviewView.swift */; };
 		1A0000000000000000000038 /* ContentAnalyzer.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000029 /* ContentAnalyzer.swift */; };
 		1A000000000000000000003A /* DashboardView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000002B /* DashboardView.swift */; };
+		1A0000000000000000000057 /* TutorialView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A0000000000000000000058 /* TutorialView.swift */; };
 		1A000000000000000000003B /* SwipeTriageView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000002C /* SwipeTriageView.swift */; };
 		1A000000000000000000003C /* VideoCompressor.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1A000000000000000000002D /* VideoCompressor.swift */; };
 /* End PBXBuildFile section */
@@ -32,6 +33,7 @@
 		1A0000000000000000000028 /* PhotoPreviewView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PhotoPreviewView.swift; sourceTree = "<group>"; };
 		1A0000000000000000000029 /* ContentAnalyzer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentAnalyzer.swift; sourceTree = "<group>"; };
 		1A000000000000000000002B /* DashboardView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DashboardView.swift; sourceTree = "<group>"; };
+		1A0000000000000000000058 /* TutorialView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TutorialView.swift; sourceTree = "<group>"; };
 		1A000000000000000000002C /* SwipeTriageView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SwipeTriageView.swift; sourceTree = "<group>"; };
 		1A000000000000000000002D /* VideoCompressor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoCompressor.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -93,6 +95,7 @@
 				1A0000000000000000000025 /* ContentView.swift */,
 				1A0000000000000000000028 /* PhotoPreviewView.swift */,
 				1A000000000000000000002B /* DashboardView.swift */,
+				1A0000000000000000000058 /* TutorialView.swift */,
 				1A000000000000000000002C /* SwipeTriageView.swift */,
 			);
 			path = Views;
@@ -184,6 +187,7 @@
 				1A0000000000000000000037 /* PhotoPreviewView.swift in Sources */,
 				1A0000000000000000000038 /* ContentAnalyzer.swift in Sources */,
 				1A000000000000000000003A /* DashboardView.swift in Sources */,
+				1A0000000000000000000057 /* TutorialView.swift in Sources */,
 				1A000000000000000000003B /* SwipeTriageView.swift in Sources */,
 				1A000000000000000000003C /* VideoCompressor.swift in Sources */,
 			);
