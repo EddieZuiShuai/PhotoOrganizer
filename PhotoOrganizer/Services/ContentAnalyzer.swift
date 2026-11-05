@@ -2,6 +2,7 @@ import Foundation
 import UIKit
 import Vision
 import ImageIO
+import CoreVideo
 
 /// 本机内容识别：场景分类 + 文字识别 + 人脸计数 + 图像统计。
 ///
@@ -32,6 +33,10 @@ final class ContentAnalyzer {
         var ranOCR: Bool = false
         /// 这一次 OCR 读到的字符数。有字但没命中关键词，往往说明分辨率不够
         var textLength: Int = 0
+        /// 人脸框面积之和占画面的比例（0~1）
+        var faceArea: Double = 0
+        /// 隐私粗筛得分（人体占比 × 肤色占比）
+        var privacyScore: Double = 0
     }
 
     // MARK: - 关键词表
@@ -170,6 +175,11 @@ final class ContentAnalyzer {
             }
         }
         out.faceCount = faceRequest.results?.count ?? 0
+        var area = 0.0
+        for face in (faceRequest.results ?? []) {
+            area += Double(face.boundingBox.width * face.boundingBox.height)
+        }
+        out.faceArea = min(1, area)
         out.tags = labels.prefix(4).map { Self.chineseName(for: $0.name) }
 
         out.textLike = isScreenshot || labels.contains { item in
@@ -178,22 +188,46 @@ final class ContentAnalyzer {
         out.documentLike = labels.contains { item in
             documentLabels.contains { item.name.contains($0) }
         }
-        out.category = Self.category(from: labels, faceCount: out.faceCount, isScreenshot: isScreenshot)
+        out.category = Self.category(
+            from: labels,
+            faceCount: out.faceCount,
+            faceArea: out.faceArea,
+            isScreenshot: isScreenshot
+        )
         return out
     }
 
     /// 只看场景标签时的归类（顺序即优先级）。
     /// 读字之后如果命中票据/文档关键词，`applyKeywords` 会把它顶掉。
+    ///
+    /// **顺序为什么改过**：以前「文档」排在「人物」前面，而文档的判据只是
+    /// `paper / book / page` 这类标签命中任意一个。证件照背景是纸、人像手里举着文件，
+    /// 都会先命中 paper，人脸的证据根本没机会被用到——这就是「文档组里全是证件照和人像」的根因。
+    /// 现在人脸面积够大就直接判人物，文档要等它让完位才有机会。
     private static func category(
         from labels: [(name: String, conf: Double)],
         faceCount: Int,
+        faceArea: Double,
         isScreenshot: Bool
     ) -> ContentCategory {
         if isScreenshot { return .screenshot }
 
-        if hasAny(labels, ["document", "paper", "book", "newspaper", "magazine", "whiteboard", "web page", "spreadsheet", "form", "letter", "page"]) {
+        // ① 人像优先：脸够大（>8% 画面）或者有两张以上的脸。
+        //    「举着文件的半身照」「证件照」都属于这一类，先抢下来。
+        if faceArea >= 0.08 || faceCount >= 2 {
+            return .person
+        }
+
+        // ② 文档：必须有强信号，且置信度够高。
+        //    只认 documentLabels 里那几个「纸面」标签，且要 0.5 以上；
+        //    page / web page 这种一命中一大片的词，单独出现不算。
+        let strongDoc = labels.contains { item in
+            item.conf >= 0.5 && documentLabels.contains { item.name.contains($0) }
+        }
+        if strongDoc {
             return .document
         }
+
         if hasAny(labels, ["food", "dish", "cuisine", "meal", "dessert", "pizza", "sushi", "cake", "bread", "fruit", "coffee", "menu", "noodle", "hot pot"]) {
             return .food
         }
@@ -211,7 +245,7 @@ final class ContentAnalyzer {
         return .other
     }
 
-    /// 关键词命中 → 覆盖分类。优先级和以前完全一致：票据 > 截图 > 文档 > 标签。
+    /// 关键词命中 → 覆盖分类。优先级：票据 > 截图 > 文档 > 标签。
     private func applyKeywords(_ text: String, isScreenshot: Bool, to out: inout Content) {
         var receiptHits: [String] = []
         for key in receiptKeywords where text.contains(key.lowercased()) {
@@ -227,7 +261,14 @@ final class ContentAnalyzer {
             out.category = .screenshot
             return
         }
-        if docKeywords.contains(where: { text.contains($0.lowercased()) }) {
+        // 门槛从「命中 1 个」提到 2 个：docKeywords 里全是「合同 / 协议 / 证明」这种
+        // 在任何一张带字的照片里都可能出现的词，一个就定死等于把一半生活照拖进文档。
+        // 另外脸大的照片不吃这条覆盖——判成文档会把证件照又拉回去。
+        var docHits = 0
+        for key in docKeywords where text.contains(key.lowercased()) {
+            docHits += 1
+        }
+        if docHits >= 2 && out.faceArea < 0.08 {
             out.category = .document
         }
     }
@@ -489,5 +530,102 @@ final class ContentAnalyzer {
         case .rightMirrored: return .rightMirrored
         @unknown default: return .up
         }
+    }
+
+    // MARK: - 隐私粗筛
+
+    /// 隐私照片粗筛：**人体占比 × 肤色占比**。
+    ///
+    /// 两条硬约束：全程在本机算，不保存任何中间图、不上传、不进日志。
+    /// 只做粗筛，宁可漏也不能错标——误标一张普通照片的代价，比漏掉一张大得多。
+    ///
+    /// 为什么不是只看肤色：木地板、沙滩、暖光下的墙都能骗过单纯的肤色统计。
+    /// 先要求「画面里有成片的人体」（Vision 人体分割），再在这张图上算肤色比例，
+    /// 两个条件同时成立才给分。
+    func privacyScore(image: UIImage) -> Double {
+        guard let cgImage = image.cgImage else { return 0 }
+
+        // ① 肤色占比。低于 12% 直接出局，连分割都不用跑——省掉大部分开销。
+        let skin = skinRatio(cgImage: cgImage)
+        guard skin > 0.12 else { return 0 }
+
+        // ② 人体占比
+        var bodyRatio = 0.0
+        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
+        let seg = VNGeneratePersonSegmentationRequest()
+        seg.qualityLevel = .fast
+        seg.outputPixelFormat = kCVPixelFormatType_OneComponent8
+        do {
+            try handler.perform([seg])
+            if let obs = seg.results?.first {
+                bodyRatio = Self.maskRatio(obs.pixelBuffer)
+            }
+        } catch {
+            return 0
+        }
+        guard bodyRatio > 0.10 else { return 0 }
+
+        // 3.2 是个经验系数：单看肤色约 0.3~0.5（正常露脸照片也会到），
+        // 乘上人体占比之后，普通生活照落在 0.05~0.15，才拉得开差距。
+        return min(1, skin * bodyRatio * 3.2)
+    }
+
+    /// 肤色像素占全图比例。RGB 规则来自常见的肤色检测阈值，粗糙但够用。
+    private func skinRatio(cgImage: CGImage) -> Double {
+        let side = 96
+        var pixels = [UInt8](repeating: 0, count: side * side * 4)
+        let ok: Bool = pixels.withUnsafeMutableBytes { buffer -> Bool in
+            guard let base = buffer.baseAddress,
+                  let ctx = CGContext(
+                    data: base,
+                    width: side,
+                    height: side,
+                    bitsPerComponent: 8,
+                    bytesPerRow: side * 4,
+                    space: CGColorSpaceCreateDeviceRGB(),
+                    bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+                  ) else { return false }
+            ctx.interpolationQuality = .low
+            ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: side, height: side))
+            return true
+        }
+        guard ok else { return 0 }
+
+        var hit = 0
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            let r = Int(pixels[i])
+            let g = Int(pixels[i + 1])
+            let b = Int(pixels[i + 2])
+            let mx = max(r, max(g, b))
+            let mn = min(r, min(g, b))
+            if r > 95, g > 40, b > 20, mx - mn > 15, abs(r - g) > 15, r > g, r > b {
+                hit += 1
+            }
+        }
+        return Double(hit) / Double(side * side)
+    }
+
+    /// 人体分割 mask 里「是人」的像素占比。每 4 个像素采一个，够用且快。
+    private static func maskRatio(_ buffer: CVPixelBuffer) -> Double {
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return 0 }
+
+        let w = CVPixelBufferGetWidth(buffer)
+        let h = CVPixelBufferGetHeight(buffer)
+        let rowBytes = CVPixelBufferGetBytesPerRow(buffer)
+        guard w > 0, h > 0 else { return 0 }
+
+        var hit = 0
+        var total = 0
+        let step = 4
+        for y in stride(from: 0, to: h, by: step) {
+            let row = base.advanced(by: y * rowBytes).assumingMemoryBound(to: UInt8.self)
+            for x in stride(from: 0, to: w, by: step) {
+                if row[x] > 128 { hit += 1 }
+                total += 1
+            }
+        }
+        return total > 0 ? Double(hit) / Double(total) : 0
     }
 }

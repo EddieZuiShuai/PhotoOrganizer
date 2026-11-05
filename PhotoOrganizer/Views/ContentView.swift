@@ -294,11 +294,25 @@ struct HomeView: View {
                     .font(.system(size: 12))
                     .foregroundColor(.secondary)
                     .multilineTextAlignment(.center)
+
+                // 版本号写在首页最底下：装完想确认「我到底装的是哪一版」，
+                // 不用去设置里翻三层。构建号就在括号里。
+                Text(appVersionText)
+                    .font(.system(size: 11))
+                    .foregroundColor(Color.secondary.opacity(0.7))
                     .padding(.bottom, 20)
             }
             .padding(20)
         }
         .onAppear(perform: loadInfo)
+    }
+
+    /// "版本 1.4（构建号 17）"——首页底部那行小字的数据源
+    private var appVersionText: String {
+        let info = Bundle.main.infoDictionary
+        let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        return "版本 \(short)（构建号 \(build)）"
     }
 
     private func statBox(title: String, value: String) -> some View {
@@ -925,7 +939,7 @@ struct ResultView: View {
                     Button {
                         selectedIDs.removeAll()
                     } label: {
-                        Text("清空")
+                        Text("取消选中 \(selectedIDs.count) 张")
                             .font(.system(size: 11, weight: .medium))
                     }
                 }
@@ -1334,7 +1348,13 @@ struct ResultView: View {
         let detail = tagText(item)
 
         return HStack(spacing: 12) {
+            // 放大角标统一挂在缩略图右上角：列表行原来是右侧一个方形按钮，
+            // 和分组卡片、网格三处三种样子，用户每换一个布局都得重新找。
             thumb(item, size: 78, selected: selected)
+                .overlay(alignment: .topTrailing) {
+                    zoomBadge(item, in: list, size: 22)
+                        .padding(3)
+                }
 
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 6) {
@@ -1423,8 +1443,6 @@ struct ResultView: View {
                 .buttonStyle(.plain)
                 .disabled(compressingID != nil)
             }
-
-            previewButton(item, in: list)
         }
         .padding(10)
         .background(Color.white)
@@ -1447,7 +1465,7 @@ struct ResultView: View {
         let selected = selectedIDs.contains(item.id)
 
         return ZStack {
-            PhotoThumbView(asset: item.asset)
+            PhotoThumbView(asset: item.asset, blurred: item.category == .privacy)
 
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
@@ -1497,20 +1515,23 @@ struct ResultView: View {
             }
         }
         .overlay(alignment: .topTrailing) {
-            if tab == .large && item.isVideo {
-                Button {
-                    confirmCompress = item
-                } label: {
-                    Text("720p")
-                        .font(.system(size: 9, weight: .semibold))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 2)
-                        .background(Capsule().fill(blue.opacity(0.9)))
+            HStack(spacing: 4) {
+                if tab == .large && item.isVideo {
+                    Button {
+                        confirmCompress = item
+                    } label: {
+                        Text("720p")
+                            .font(.system(size: 9, weight: .semibold))
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(blue.opacity(0.9)))
+                    }
+                    .buttonStyle(.plain)
                 }
-                .buttonStyle(.plain)
-                .padding(4)
+                zoomBadge(item, in: list, size: 24)
             }
+            .padding(4)
         }
         .overlay(alignment: .bottomTrailing) {
             if selected {
@@ -1535,7 +1556,7 @@ struct ResultView: View {
     /// 方形缩略图 + 选中态（蓝底 + 白框 + 右下角勾）
     private func thumb(_ item: PhotoItem, size: CGFloat, selected: Bool) -> some View {
         ZStack(alignment: .bottomTrailing) {
-            PhotoThumbView(asset: item.asset, size: size)
+            PhotoThumbView(asset: item.asset, size: size, blurred: item.category == .privacy)
 
             if selected {
                 Rectangle()
@@ -1567,17 +1588,25 @@ struct ResultView: View {
         }
     }
 
-    private func previewButton(_ item: PhotoItem, in list: [PhotoItem]) -> some View {
+    /// 统一的「放大」角标：所有布局、所有分类都用它，位置固定右上角。
+    ///
+    /// 之前只有列表布局右侧有一个方形按钮，分组卡片和网格里只能长按——
+    /// 长按是隐藏技能，用户根本不知道。现在改成每张缩略图右上角都挂一个，
+    /// 样式只有一个来源，改一次到处生效。
+    private func zoomBadge(_ item: PhotoItem, in list: [PhotoItem], size: CGFloat = 24) -> some View {
         Button {
             open(item, in: list)
         } label: {
             Image(systemName: "arrow.up.left.and.arrow.down.right")
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundColor(.secondary)
-                .frame(width: 30, height: 30)
-                .background(Circle().fill(Color.black.opacity(0.05)))
+                .font(.system(size: size * 0.42, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: size, height: size)
+                .background(Circle().fill(Color.black.opacity(0.45)))
+                .overlay(Circle().stroke(Color.white.opacity(0.55), lineWidth: 0.8))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel("放大 " + item.displayName)
+        .accessibilityIdentifier("zoom-" + item.displayName)
     }
 
     private func shortDate(_ item: PhotoItem) -> String {
@@ -1677,7 +1706,9 @@ struct ResultView: View {
                     Button {
                         selectedIDs.removeAll()
                     } label: {
-                        Text("取消")
+                        // 只写「取消」两个字，用户会分不清「取消本次操作」还是「取消这些选中」。
+                        // 把数量写进去，按钮自己就说明了会发生什么。
+                        Text("取消选中 \(selectedIDs.count) 张")
                             .font(.system(size: 15))
                             .foregroundColor(.primary)
                             .frame(maxWidth: .infinity)
@@ -2022,7 +2053,7 @@ struct SelectableThumb: View {
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            PhotoThumbView(asset: item.asset, size: size)
+            PhotoThumbView(asset: item.asset, size: size, blurred: item.category == .privacy)
 
             if isSelected {
                 Rectangle()
@@ -2081,6 +2112,9 @@ struct PhotoThumbView: View {
     let asset: PHAsset
     /// nil 表示铺满父容器（网格用）
     var size: CGFloat? = nil
+    /// 隐私分组里的缩略图先糊掉，点开才看原图。
+    /// 目的不是防别人，是防自己当着别人的面滑相册。
+    var blurred: Bool = false
 
     @State private var image: UIImage?
 
@@ -2106,6 +2140,7 @@ struct PhotoThumbView: View {
                             Image(uiImage: image)
                                 .resizable()
                                 .scaledToFill()
+                                .blur(radius: blurred ? 16 : 0)
                         } else {
                             Image(systemName: "photo")
                                 .font(.system(size: 16))

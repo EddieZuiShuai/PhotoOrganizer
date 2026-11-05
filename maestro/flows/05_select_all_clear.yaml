@@ -16,7 +16,8 @@ name: 05 全选 / 取消全选 / 清空
 - assertVisible: "重新扫描"
 - assertVisible: "导出清单"
 
-# 只选两张，再用「清空」按钮一次性归零
+# 只选两张，再用顶部的「取消选中 N 张」一次性归零
+# （原来这里只有一个「清空」小字，2026-11-05 改成了带数量的按钮）
 - tapOn:
     text: "照片 .*"
     index: 0
@@ -24,6 +25,6 @@ name: 05 全选 / 取消全选 / 清空
     text: "照片 .*"
     index: 1
 - assertVisible: "已选 2 张.*"
-- tapOn: "清空"
+- tapOn: "取消选中 2 张"
 - assertVisible: "点一下选中.*"
 - assertVisible: "重新扫描"

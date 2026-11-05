@@ -10,6 +10,7 @@ enum ContentCategory: String, CaseIterable, Identifiable {
     case food = "美食"
     case scenery = "风景"
     case pet = "宠物"
+    case privacy = "隐私"
     case other = "其他"
 
     var id: String { rawValue }
@@ -23,6 +24,7 @@ enum ContentCategory: String, CaseIterable, Identifiable {
         case .food: return "fork.knife"
         case .scenery: return "mountain.2.fill"
         case .pet: return "pawprint.fill"
+        case .privacy: return "eye.slash.fill"
         case .other: return "square.grid.2x2"
         }
     }
@@ -61,6 +63,14 @@ struct PhotoItem: Identifiable {
     var ocrHits: [String] = []
     /// 人脸数量
     var faceCount: Int = 0
+    /// 人脸框面积之和（占整幅画面的比例，0~1）。
+    /// 光有「有没有脸」不够：证件照背景是纸，只有面积够大才说明这是人像而不是「纸上有个小人」。
+    var faceArea: Double = 0
+    /// 隐私粗筛得分 0~1（人体占比 × 肤色占比，本机算，不上传）
+    var privacyScore: Double = 0
+    /// 内容识别（分类 / 二维码 / OCR）是否已经跑过。
+    /// 增量扫描靠它判断「这张还要不要再认一遍」。
+    var contentDone: Bool = false
 
     // MARK: 图像统计
 

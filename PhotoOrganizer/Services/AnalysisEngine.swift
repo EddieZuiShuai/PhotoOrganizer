@@ -100,6 +100,9 @@ final class AnalysisEngine {
         var tFetch = 0.0   // 取缩略图（解码 + 缩放）
         var tCalc = 0.0    // 哈希 + 清晰度 + 统计
         var noThumb = 0
+        var cacheHits = 0
+
+        ScanCache.shared.loadIfNeeded()
 
         for (index, asset) in assets.enumerated() {
             let isVideo = (asset.mediaType == .video)
@@ -108,6 +111,25 @@ final class AnalysisEngine {
             // 整段跑在一个不返回的闭包里，池子一直不排空的话两万张能攒出几个 GB，
             // 中途被系统 jetsam 掉——表现就是「扫到某个百分比突然闪退，还找不到崩溃日志」。
             autoreleasepool {
+                // 增量扫描：这张算过、而且文件没被改过，就直接拿上次的结果。
+                // 一次缩略图都不取——这是「第二次扫描一分钟」的全部秘密。
+                if let cached = ScanCache.shared.hit(for: asset) {
+                    var item = PhotoItem(
+                        id: asset.localIdentifier,
+                        asset: asset,
+                        creationDate: asset.creationDate,
+                        pixelWidth: asset.pixelWidth,
+                        pixelHeight: asset.pixelHeight,
+                        isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
+                        isVideo: isVideo
+                    )
+                    item.isFavorite = asset.isFavorite
+                    cached.apply(to: &item)
+                    items.append(item)
+                    cacheHits += 1
+                    return
+                }
+
                 var item = PhotoItem(
                     id: asset.localIdentifier,
                     asset: asset,
@@ -146,7 +168,14 @@ final class AnalysisEngine {
                     }
                 }
 
+                // 特征算完立刻存进内存字典；落盘是按批做的，见下面的 flush。
+                // 断点续扫靠的就是这份缓存：中途被杀，重启后已算过的直接跳过。
+                ScanCache.shared.store(item, asset: asset)
                 items.append(item)
+            }
+
+            if index % 800 == 0 && index > 0 {
+                ScanCache.shared.flush()
             }
 
             if index % 25 == 0 || index == total - 1 {
@@ -154,8 +183,10 @@ final class AnalysisEngine {
             }
         }
 
-        NSLog("[PhotoOrganizer][Scan] 特征 %d 张｜取缩略图 %.1fs｜计算 %.1fs｜取不到缩略图 %d 张",
-              total, tFetch, tCalc, noThumb)
+        ScanCache.shared.flush()
+
+        NSLog("[PhotoOrganizer][Scan] 特征 %d 张｜命中缓存 %d 张｜取缩略图 %.1fs｜计算 %.1fs｜取不到缩略图 %d 张",
+              total, cacheHits, tFetch, tCalc, noThumb)
         return items
     }
 
@@ -255,7 +286,7 @@ final class AnalysisEngine {
             return !item.isVideo && item.isScreenshot
         }
         result.suggestedItems = scored
-            .filter { !$0.isVideo && !$0.isFavorite && $0.cleanupScore >= 0.5 }
+            .filter { !$0.isVideo && !$0.isFavorite && $0.cleanupScore >= 0.5 && $0.category != .privacy }
             .sorted { $0.cleanupScore > $1.cleanupScore }
 
         // 内容没跑完就不出分类：否则「其他 22066」会像 bug 一样挂在结果页上
@@ -303,6 +334,7 @@ final class AnalysisEngine {
         var bigCount = 0
         var memSkips = 0
         var memoryTight = false
+        var contentSkipped = 0
 
         var tThumb = 0.0
         var tClassify = 0.0
@@ -320,6 +352,21 @@ final class AnalysisEngine {
             autoreleasepool {
                 let item = out[i]
                 guard !item.isVideo else { return }
+
+                // 增量：这张上次已经认过（分类 / 二维码 / OCR 都跑完了），直接跳过。
+                // 它省掉的是整条链路上最贵的一段，第二次扫描就靠这个。
+                if item.contentDone {
+                    contentSkipped += 1
+                    return
+                }
+
+                // defer 保证无论从哪个分支 return 出去，这张都被标记成「已识别」并写进缓存。
+                // 少写一处就会出现「每次扫描都重认同一批」的假增量。
+                defer {
+                    out[i].contentDone = true
+                    ScanCache.shared.store(out[i], asset: assets[i])
+                }
+
                 let asset = assets[i]
 
                 let t0 = CFAbsoluteTimeGetCurrent()
@@ -331,7 +378,23 @@ final class AnalysisEngine {
                 out[i].category = content.category
                 out[i].contentTags = content.tags
                 out[i].faceCount = content.faceCount
+                out[i].faceArea = content.faceArea
                 tClassify += CFAbsoluteTimeGetCurrent() - t1
+
+                // ⓪ 隐私粗筛：只对「有脸」的照片跑。
+                //    人体分割是这一段里除 OCR 外最贵的，全库跑会把时间翻倍；
+                //    而没有人脸的照片本来也不在目标范围内。
+                if content.faceCount > 0 || content.faceArea > 0.05 {
+                    let tP = CFAbsoluteTimeGetCurrent()
+                    let score = ContentAnalyzer.shared.privacyScore(image: thumb)
+                    out[i].privacyScore = score
+                    if score >= 0.34 {
+                        out[i].category = .privacy
+                        tClassify += CFAbsoluteTimeGetCurrent() - tP
+                        return
+                    }
+                    tClassify += CFAbsoluteTimeGetCurrent() - tP
+                }
 
                 // ① 小图上先扫一眼二维码。截图里的发票、离得近拍的发票，320px 也常读得出；
                 //    命中就到此为止，既不用取大图也不用读字。
@@ -431,10 +494,15 @@ final class AnalysisEngine {
             if i % 20 == 0 || i == total - 1 {
                 progress?(i + 1, total, "正在识别发票与内容分类")
             }
+            if i % 800 == 0 && i > 0 {
+                ScanCache.shared.flush()
+            }
         }
 
-        NSLog("[PhotoOrganizer][Scan] 内容识别 %d 张 / %.1fs｜取图 %.1fs｜分类 %.1fs｜二维码 %.1fs（试 %d 次，命中 %d）｜OCR %.1fs（%d 次，大图 %d 张，因内存跳过 %d 张）",
-              total, CFAbsoluteTimeGetCurrent() - start, tThumb, tClassify,
+        ScanCache.shared.flush()
+
+        NSLog("[PhotoOrganizer][Scan] 内容识别 %d 张（跳过已识别 %d 张）/ %.1fs｜取图 %.1fs｜分类 %.1fs｜二维码 %.1fs（试 %d 次，命中 %d）｜OCR %.1fs（%d 次，大图 %d 张，因内存跳过 %d 张）",
+              total, contentSkipped, CFAbsoluteTimeGetCurrent() - start, tThumb, tClassify,
               tQR, qrTried, qrHits, tOCR, ocrUsed, bigCount, memSkips)
 
         return out
@@ -484,6 +552,11 @@ final class AnalysisEngine {
         }
 
         for item in items where !item.isVideo {
+            // 隐私类不参与清理打分。
+            // 它的判定是概率性的，混进「建议清理」等于让用户顺手删掉不该删的东西；
+            // 重复组的加分在上面那段已经算过，那是另一回事（真的重复）。
+            if item.category == .privacy { continue }
+
             // 模糊：只和「本相册自己的中位清晰度」比，避免不同机型/光线条件误伤。
             // 绝对值再卡一道，和界面「标准」档保持一致，免得建议清理里塞进一堆其实还行的照片。
             if let s = item.sharpness, s > 0, !item.isLowDetail, !item.isScreenshot {
@@ -861,4 +934,164 @@ enum MemoryProbe {
         }
         return 9999
     }
+}
+
+// MARK: - 增量扫描缓存
+
+/// 一张照片「算完之后」的全部结果，不含 `PHAsset` 本身（那个不能序列化）。
+///
+/// 存下来的目的只有一个：下次扫描时，这些字段不用再算一遍。
+/// 特征值（dHash / 清晰度）和内容识别（分类 / OCR）都在里面，
+/// 所以第二次扫描既不取缩略图、也不跑 Vision。
+struct CachedPhoto: Codable {
+
+    var id: String
+    /// 文件修改时间。变了（裁剪、滤镜、调色）就作废重算。
+    var modified: Double
+    var fileSize: Int64
+    var isScreenshot: Bool
+    var isVideo: Bool
+
+    // 特征
+    var dHash: UInt64?
+    var sharpness: Double?
+    var contrastRange: Double
+    var isLowDetail: Bool
+    var brightness: Double
+    var edgeDensity: Double
+
+    // 内容
+    var categoryRaw: String
+    var contentTags: [String]
+    var ocrHits: [String]
+    var faceCount: Int
+    var faceArea: Double
+    var privacyScore: Double
+    var contentDone: Bool
+
+    init(item: PhotoItem, asset: PHAsset) {
+        self.id = item.id
+        self.modified = asset.modificationDate?.timeIntervalSince1970 ?? 0
+        self.fileSize = item.fileSize
+        self.isScreenshot = item.isScreenshot
+        self.isVideo = item.isVideo
+
+        self.dHash = item.dHash
+        self.sharpness = item.sharpness
+        self.contrastRange = item.contrastRange
+        self.isLowDetail = item.isLowDetail
+        self.brightness = item.brightness
+        self.edgeDensity = item.edgeDensity
+
+        self.categoryRaw = item.category.rawValue
+        self.contentTags = item.contentTags
+        self.ocrHits = item.ocrHits
+        self.faceCount = item.faceCount
+        self.faceArea = item.faceArea
+        self.privacyScore = item.privacyScore
+        self.contentDone = item.contentDone
+    }
+
+    func apply(to item: inout PhotoItem) {
+        item.fileSize = fileSize
+        item.dHash = dHash
+        item.sharpness = sharpness
+        item.contrastRange = contrastRange
+        item.isLowDetail = isLowDetail
+        item.brightness = brightness
+        item.edgeDensity = edgeDensity
+        item.category = ContentCategory(rawValue: categoryRaw) ?? .other
+        item.contentTags = contentTags
+        item.ocrHits = ocrHits
+        item.faceCount = faceCount
+        item.faceArea = faceArea
+        item.privacyScore = privacyScore
+        item.contentDone = contentDone
+    }
+}
+
+/// 两万张照片的特征结果 ≈ 5 MB，落盘一次几十毫秒。
+///
+/// 设计上刻意不做「读取时逐条查文件」：整份读进内存的字典，命中判断是一次哈希查找，
+/// 两万次也就几毫秒。IO 只在 flush 时发生，而且按批（每 800 张）做，
+/// 既不拖慢主循环，也把断点粒度控制在「最多重算 800 张」。
+final class ScanCache {
+
+    static let shared = ScanCache()
+    private init() {}
+
+    /// 算法变了就 +1，旧缓存整体作废——总比拿旧口径的结果去比新阈值好。
+    private let version = 1
+
+    private let io = DispatchQueue(label: "com.eddie.photoorganizer.scancache", qos: .utility)
+    private var map: [String: CachedPhoto] = [:]
+    private var loaded = false
+
+    private var fileURL: URL? {
+        let fm = FileManager.default
+        guard let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
+            return nil
+        }
+        // 放 Application Support 而不是 Caches：Caches 会被系统在空间紧张时清掉，
+        // 清掉就等于用户白扫了一次。
+        let dir = base.appendingPathComponent("PhotoOrganizer", isDirectory: true)
+        if !fm.fileExists(atPath: dir.path) {
+            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
+        return dir.appendingPathComponent("scan-cache-v\(version).plist")
+    }
+
+    // MARK: 读
+
+    func loadIfNeeded() {
+        guard !loaded else { return }
+        loaded = true
+        guard let url = fileURL, let data = try? Data(contentsOf: url) else { return }
+        let decoder = PropertyListDecoder()
+        if let list = try? decoder.decode([CachedPhoto].self, from: data) {
+            var m: [String: CachedPhoto] = [:]
+            m.reserveCapacity(list.count)
+            for e in list { m[e.id] = e }
+            map = m
+            NSLog("[PhotoOrganizer][Scan] 增量缓存载入 %d 条", list.count)
+        }
+    }
+
+    /// 命中条件：同一条 asset，且修改时间没变。
+    func hit(for asset: PHAsset) -> CachedPhoto? {
+        guard let e = map[asset.localIdentifier] else { return nil }
+        let now = asset.modificationDate?.timeIntervalSince1970 ?? 0
+        // 容差 1 秒：Photos 给的 modificationDate 偶尔会有亚秒抖动
+        guard abs(now - e.modified) <= 1 else { return nil }
+        return e
+    }
+
+    // MARK: 写
+
+    func store(_ item: PhotoItem, asset: PHAsset) {
+        map[item.id] = CachedPhoto(item: item, asset: asset)
+    }
+
+    /// 按批落盘。传的是值拷贝（CoW），真正的编码在后台队列做，不挡主循环。
+    func flush() {
+        let snapshot = Array(map.values)
+        guard !snapshot.isEmpty else { return }
+        io.async { [weak self] in
+            guard let url = self?.fileURL else { return }
+            let encoder = PropertyListEncoder()
+            encoder.outputFormat = .binary
+            guard let data = try? encoder.encode(snapshot) else { return }
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    func clear() {
+        map.removeAll()
+        if let url = fileURL {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    /// 给界面用：缓存里有多少张、占多大
+    var count: Int { map.count }
 }
