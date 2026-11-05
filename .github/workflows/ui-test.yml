@@ -76,15 +76,48 @@ jobs:
           curl -Ls "https://get.maestro.mobile.dev" | bash
           "$HOME/.maestro/bin/maestro" --version
 
+      - name: 预检 - App 到底能不能起来
+        if: always()
+        run: |
+          export PATH="$HOME/.maestro/bin:$PATH"
+          UDID="${{ steps.sim.outputs.udid }}"
+          mkdir -p build/preflight
+
+          echo "== 已安装的 App =="
+          xcrun simctl listapps "$UDID" 2>/dev/null | grep -i -A3 'photoorganizer' | head -20 || true
+
+          echo "== 用 simctl 直接启动 =="
+          xcrun simctl launch "$UDID" com.eddie.photoorganizer 2>&1 | tee build/preflight/launch.txt || true
+          sleep 6
+
+          echo "== 截一张当前屏幕 =="
+          xcrun simctl io "$UDID" screenshot build/preflight/home.png || true
+          ls -l build/preflight/home.png || true
+
+          echo "== App 进程还在不在 =="
+          xcrun simctl spawn "$UDID" launchctl list 2>/dev/null | grep -i photoorganizer || echo "(进程列表里没有它 —— 说明启动后就退了)"
+
+          echo "== 崩溃报告 =="
+          ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -5 || echo "(没有 .ips)"
+          for f in $(ls -t ~/Library/Logs/DiagnosticReports/*.ips 2>/dev/null | head -2); do
+            echo "--- $f ---"
+            head -50 "$f" || true
+          done
+
+          echo "== Maestro 看到的界面元素 =="
+          maestro hierarchy > build/preflight/hierarchy.txt 2>&1 || true
+          head -100 build/preflight/hierarchy.txt
+
       - name: 跑 UI 用例
         id: test
         run: |
           export PATH="$HOME/.maestro/bin:$PATH"
           export MAESTRO_DRIVER_STARTUP_TIMEOUT=240000
-          mkdir -p build/maestro-results
+          mkdir -p build/maestro-results build/maestro-debug
           set +e
           maestro test \
             --test-output-dir build/maestro-results \
+            --debug-output build/maestro-debug \
             --flatten-debug-output \
             --format junit \
             --output build/maestro-report.xml \
@@ -95,6 +128,7 @@ jobs:
           echo "Maestro exit code: $CODE"
           # 列一下到底产出了什么，方便排查
           find build/maestro-results -type f | head -50 || true
+          find build/maestro-debug -type f | head -50 || true
           find build -maxdepth 1 -name 'maestro-report.xml' -exec ls -l {} \; || true
           # 让这一步自己变红，失败不要藏在后面几步里
           exit $CODE
@@ -123,6 +157,8 @@ jobs:
           path: |
             build/maestro-report.xml
             build/maestro-results
+            build/maestro-debug
+            build/preflight
           retention-days: 14
 
       - name: 结果汇总
