@@ -328,6 +328,15 @@ struct ScanningView: View {
 
 // MARK: - 结果
 
+/// 预览要呈现的一组照片。
+/// 每次打开都生成新的 id，保证覆盖层拿到的是「这一次」的数据和起始位置，
+/// 不会复用上一次的快照。
+struct PreviewTarget: Identifiable {
+    let id = UUID()
+    let items: [PhotoItem]
+    let startIndex: Int
+}
+
 /// 列表布局：单列 / 两列 / 三列
 enum LayoutMode: Int, CaseIterable, Identifiable {
     case list = 1
@@ -395,9 +404,10 @@ struct ResultView: View {
     @State private var selectedIDs: Set<String> = []
     @State private var deletedIDs: Set<String> = []
 
-    @State private var previewItems: [PhotoItem] = []
-    @State private var previewStart: Int = 0
-    @State private var showPreview = false
+    /// 用「要预览的对象」来控制弹出，而不是 Bool + 三个并列状态。
+    /// 后者在第一次弹出时会拿到尚未更新的空数组（SwiftUI 的呈现内容按快照捕获），
+    /// 表现就是「第一次点开照片永远是空白页」。
+    @State private var previewTarget: PreviewTarget?
 
     @State private var message: String?
     @State private var toast: String?
@@ -487,10 +497,10 @@ struct ResultView: View {
         .onChange(of: albumChoice) { choice in
             reloadAlbumIDs(choice)
         }
-        .fullScreenCover(isPresented: $showPreview) {
+        .fullScreenCover(item: $previewTarget) { target in
             PhotoPreviewView(
-                items: previewItems,
-                startIndex: previewStart,
+                items: target.items,
+                startIndex: target.startIndex,
                 selectedIDs: $selectedIDs
             ) { item in
                 deleteItems([item])
@@ -1553,9 +1563,9 @@ struct ResultView: View {
 
     private func open(_ item: PhotoItem, in list: [PhotoItem]) {
         guard let idx = list.firstIndex(where: { $0.id == item.id }) else { return }
-        previewItems = list
-        previewStart = idx
-        showPreview = true
+        // 列表偶尔会传进来只含这一张的数组，兜底保证预览里至少能看到它
+        let payload = list.isEmpty ? [item] : list
+        previewTarget = PreviewTarget(items: payload, startIndex: idx)
     }
 
     /// 一步删除：点一下直接调系统删除，只剩 iOS 自己那一次确认。
@@ -1804,25 +1814,55 @@ struct PhotoThumbView: View {
 
     @State private var image: UIImage?
 
+    private var isVideo: Bool { asset.mediaType == .video }
+
+    private var durationLabel: String {
+        let total = Int(asset.duration.rounded())
+        guard total > 0 else { return "" }
+        let m = total / 60
+        let s = total % 60
+        if m >= 60 {
+            return String(format: "%d:%02d:%02d", m / 60, m % 60, s)
+        }
+        return String(format: "%d:%02d", m, s)
+    }
+
     var body: some View {
-        Color.black.opacity(0.06)
-            .overlay(
-                Group {
-                    if let image = image {
-                        Image(uiImage: image)
-                            .resizable()
-                            .scaledToFill()
-                    } else {
-                        Image(systemName: "photo")
-                            .font(.system(size: 16))
-                            .foregroundColor(.secondary)
+        ZStack(alignment: .bottomLeading) {
+            Color.black.opacity(0.06)
+                .overlay(
+                    Group {
+                        if let image = image {
+                            Image(uiImage: image)
+                                .resizable()
+                                .scaledToFill()
+                        } else {
+                            Image(systemName: "photo")
+                                .font(.system(size: 16))
+                                .foregroundColor(.secondary)
+                        }
                     }
+                )
+
+            // 视频角标：图标 + 时长，避免只靠颜色区分
+            if isVideo {
+                HStack(spacing: 3) {
+                    Image(systemName: "play.fill")
+                        .font(.system(size: 7, weight: .bold))
+                    Text(durationLabel.isEmpty ? "视频" : durationLabel)
+                        .font(.system(size: 10, weight: .semibold))
                 }
-            )
-            .frame(width: size, height: size)
-            .clipped()
-            .cornerRadius(size == nil ? 0 : 8)
-            .onAppear(perform: load)
+                .foregroundColor(.white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.black.opacity(0.55)))
+                .padding(4)
+            }
+        }
+        .frame(width: size, height: size)
+        .clipped()
+        .cornerRadius(size == nil ? 0 : 8)
+        .onAppear(perform: load)
     }
 
     private func load() {

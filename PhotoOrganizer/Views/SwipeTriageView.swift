@@ -8,6 +8,7 @@ struct TriageImage: View {
     let asset: PHAsset
 
     @State private var image: UIImage?
+    @State private var requestID: String = ""
 
     var body: some View {
         GeometryReader { geo in
@@ -23,17 +24,31 @@ struct TriageImage: View {
                     ProgressView()
                 }
             }
-            .onAppear { load(geo.size) }
+            .onAppear { reload(size: geo.size) }
+            // 关键：卡片在 ZStack 里位置不变，SwiftUI 会复用同一个视图、连 @State 一起留着，
+            // 只在 onAppear 里加载的话，翻到下一张时永远不会重新取图，画面就一直停在第一张。
+            .onChange(of: asset.localIdentifier) { _ in reload(size: geo.size) }
+            .onChange(of: geo.size) { newSize in
+                if image == nil { reload(size: newSize) }
+            }
         }
     }
 
-    private func load(_ size: CGSize) {
-        guard image == nil, size.width > 1 else { return }
+    private func reload(size: CGSize) {
+        guard size.width > 1 else { return }
+        let id = asset.localIdentifier
+        requestID = id
+        image = nil
+
         let scale = UIScreen.main.scale
         let target = CGSize(width: size.width * scale, height: size.height * scale)
-        PhotoLibraryService.shared.loadImage(for: asset, targetSize: target) { img in
+        let assetRef = asset
+
+        PhotoLibraryService.shared.loadImage(for: assetRef, targetSize: target) { img in
             DispatchQueue.main.async {
-                if let img = img { self.image = img }
+                // 图是异步回来的，回来时可能已经翻过好几张了
+                guard requestID == id else { return }
+                image = img
             }
         }
     }
