@@ -44,9 +44,12 @@ final class AnalysisEngine {
             // 连分类都没做：发票恒为 0、内容分类全落进「其他」，界面上还看不出原因。
             let ocrBudget = 4000
             var ocrUsed = 0
-            // 细节 OCR：只对「看起来像纸/票」的照片重取 1024px 再读一次，单独给预算
-            let detailOCRBudget = 1500
-            var detailOCRUsed = 0
+            // 细节 OCR：只对「看起来像纸/票」的照片重取 1024px 再读一次。
+            // 预算分两份，见下面 wantsByLabel / wantsByText 的注释。
+            let detailDocBudget = 1200
+            var detailDocUsed = 0
+            let detailTextBudget = 300
+            var detailTextUsed = 0
 
             // 1) 逐张提取特征 + 内容识别（一次缩略图，算四样东西）
             for (index, asset) in assets.enumerated() {
@@ -96,11 +99,18 @@ final class AnalysisEngine {
                         // 320px 的图上，发票的字只有 3~6 像素高，读不出来。
                         // 所以「看起来像纸/票」，或者「明明读到了字但没命中关键词」的照片，
                         // 重取一张约 1024px 的图再读一次——这是「发票恒为 0」的正解。
-                        // 两个条件都刻意收紧，再加一个总量上限，避免整库多读一遍大图。
-                        let wantsDetail = content.documentLike || content.textLength >= 12
-                        if wantsDetail && !item.isScreenshot && detailOCRUsed < detailOCRBudget {
+                        //
+                        // 两份预算分开算：只靠标签命中的那批才是高置信度，
+                        // 靠「读到字」兜底的那批容易一大片（路牌、菜单、包装说明都会被算进来）。
+                        // 混用一个池子的话，相册开头那几十张就能把额度吃干净，后面的发票轮不到。
+                        let wantsByLabel = content.documentLike
+                        let wantsByText = !wantsByLabel && content.textLength >= 12
+                        let hasBudget = (wantsByLabel && detailDocUsed < detailDocBudget)
+                            || (wantsByText && detailTextUsed < detailTextBudget)
+
+                        if hasBudget && !item.isScreenshot {
                             if let big = library.imageForOCR(for: asset, maxPixel: 1024) {
-                                detailOCRUsed += 1
+                                if wantsByLabel { detailDocUsed += 1 } else { detailTextUsed += 1 }
                                 let detail = ContentAnalyzer.shared.ocrOnly(image: big)
                                 if !detail.receiptHits.isEmpty {
                                     item.category = .receipt
