@@ -5,9 +5,15 @@ name: 共用 - 启动并等扫描跑完
 # Maestro 2.x 要求每个被解析的 flow 文件都带配置头（哪怕只是被 runFlow 引用），
 # 少了会直接报 Config Section Required。
 - launchApp
-
-- assertVisible: "开始扫描"
 - takeScreenshot: 00_home
+
+# iPhone SE（375×667）上首页内容比屏幕高，「开始扫描」掉在首屏之下，
+# 直接断言会判成不可见。统一先滚到它露出来再点，大屏上这一步是空操作。
+- scrollUntilVisible:
+    element:
+      text: "开始扫描"
+    direction: DOWN
+    timeout: 20000
 - tapOn: "开始扫描"
 
 # 12 张测试图在模拟器上要跑完清晰度 + 内容识别，给足 3 分钟
