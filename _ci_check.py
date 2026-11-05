@@ -101,20 +101,24 @@ def read_log(run_id):
     return job, txt
 
 
+ART_ROOT = OUT_DIR
+
+
 def grab_artifacts(run_id):
+    global ART_ROOT
     arts = api("/repos/%s/%s/actions/runs/%s/artifacts" % (OWNER, REPO, run_id))["artifacts"]
     if not arts:
         print("没有 artifact")
         return []
-    # 先清空：extractall 不会删旧文件，上一轮的 po-diag.txt 之类会残留下来冒充本轮结果
-    if os.path.isdir(OUT_DIR):
-        shutil.rmtree(OUT_DIR, ignore_errors=True)
-    os.makedirs(OUT_DIR, exist_ok=True)
+    # 按 run_id 分目录：既不删旧的（一次删两百多个文件会触发环境的安全删除拦截），
+    # 也天然避免上一轮的 po-diag.txt 之类冒充这一轮的结果。
+    ART_ROOT = os.path.join(OUT_DIR, str(run_id))
+    os.makedirs(ART_ROOT, exist_ok=True)
     names = []
     for a in arts:
         blob = raw("/repos/%s/%s/actions/artifacts/%s/zip" % (OWNER, REPO, a["id"]))
         z = zipfile.ZipFile(io.BytesIO(blob))
-        z.extractall(os.path.join(OUT_DIR, a["name"]))
+        z.extractall(os.path.join(ART_ROOT, a["name"]))
         names = z.namelist()
     return names
 
@@ -164,7 +168,7 @@ def main():
     for n in names:
         print("  " + n)
 
-    base = os.path.join(OUT_DIR, "maestro-results")
+    base = os.path.join(ART_ROOT, "maestro-results")
     for rel, label, n in [
         ("preflight/po-diag.txt", "缩略图自检", 60),
         ("preflight/launch.txt", "simctl 启动输出", 20),
