@@ -226,25 +226,43 @@ enum DebugSelfCheck {
             let assets = PhotoLibraryService.shared.fetchAllAssets()
             lines.append("assets=\(assets.count)")
 
-            let sample = Array(assets.prefix(4))
+            let sample = Array(assets.prefix(5))
             if sample.isEmpty {
                 lines.append("相册为空，没什么可测")
                 write(lines)
                 return
             }
 
+            var thumbOK = 0
+            var hashOK = 0
+            var sharpOK = 0
+
             for (i, asset) in sample.enumerated() {
                 lines.append("--- [\(i)] \(asset.pixelWidth)x\(asset.pixelHeight) "
                              + "size=\(PhotoLibraryService.shared.fileSize(of: asset))")
-                lines.append("    fastFormat        : " + probe(asset, .fastFormat, network: false))
-                lines.append("    highQualityFormat : " + probe(asset, .highQualityFormat, network: false))
-                lines.append("    opportunistic     : " + probe(asset, .opportunistic, network: false))
-                lines.append("    highQuality+net   : " + probe(asset, .highQualityFormat, network: true))
-                lines.append("    引擎实际用的那一个 : "
-                             + (PhotoLibraryService.shared.thumbnail(for: asset, maxPixel: 320) == nil
-                                ? "nil  <- 取不到" : "有图"))
+                if i == 0 {
+                    lines.append("    fastFormat        : " + probe(asset, .fastFormat, network: false))
+                    lines.append("    highQualityFormat : " + probe(asset, .highQualityFormat, network: false))
+                    lines.append("    opportunistic     : " + probe(asset, .opportunistic, network: false))
+                }
+
+                if let thumb = PhotoLibraryService.shared.thumbnail(for: asset, maxPixel: 320) {
+                    thumbOK += 1
+                    let hash = AnalysisEngine.shared.dHash(from: thumb)
+                    let sharp = AnalysisEngine.shared.sharpnessDetail(from: thumb)
+                    if hash != nil { hashOK += 1 }
+                    if sharp != nil { sharpOK += 1 }
+                    lines.append("    thumb=\(Int(thumb.size.width))x\(Int(thumb.size.height)) "
+                                 + "cgImage=\(thumb.cgImage == nil ? "nil" : "ok") "
+                                 + "dHash=\(hash.map { String($0, radix: 16) } ?? "nil") "
+                                 + "sharpness=\(sharp.map { String(format: "%.1f", $0.lapVar) } ?? "nil") "
+                                 + "lowDetail=\(sharp?.lowDetail.description ?? "-")")
+                } else {
+                    lines.append("    thumb=nil  <- 取不到缩略图，后面所有特征都不会算")
+                }
             }
 
+            lines.append("汇总：缩略图 \(thumbOK)/\(sample.count)  dHash \(hashOK)/\(sample.count)  清晰度 \(sharpOK)/\(sample.count)")
             write(lines)
         }
     }

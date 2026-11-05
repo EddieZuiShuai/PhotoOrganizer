@@ -29,7 +29,7 @@ name: 06 布局三档切换 + 分组页隐藏布局按钮
 - takeScreenshot: 10_layout_remembered
 
 # 分组页（重复 / 相似）不应该出现布局按钮
-- tapOn: "重复.*"
+- tapOn: "重复 [0-9]+"
 - assertNotVisible: "单列"
 - assertNotVisible: "两列"
 - assertNotVisible: "三列"

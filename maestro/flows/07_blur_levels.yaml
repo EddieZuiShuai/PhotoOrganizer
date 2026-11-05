@@ -25,5 +25,5 @@ name: 07 模糊页：三档灵敏度
 - takeScreenshot: 13_blur_strict
 
 # 切回普通分类，判定条要消失
-- tapOn: "建议清理.*"
+- tapOn: "建议清理 [0-9]+"
 - assertNotVisible: "模糊判定"
