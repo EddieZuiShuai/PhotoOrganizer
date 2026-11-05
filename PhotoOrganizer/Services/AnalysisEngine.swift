@@ -23,230 +23,421 @@ final class AnalysisEngine {
     /// 「完全重复」的候选预筛距离：只有哈希非常接近的才会去核对原图字节
     var exactCandidateDistance: Int = 3
 
-    // MARK: - 主流程
+    // MARK: - 主流程（两阶段出货）
 
+    /// 扫描分两次交付结果。
+    ///
+    /// 1. **先出货**：只算「读缩略图就能算出来的东西」——dHash、清晰度、亮度/边缘，
+    ///    据此给出重复组、相似组、模糊、截图、建议清理。这一段不含任何 Vision 请求，
+    ///    耗时基本只剩解码缩略图，两万张的库也是一分钟级。
+    /// 2. **后台补齐**：内容识别（场景分类 + 发票二维码 + OCR）比特征贵一个数量级，
+    ///    让它跑在结果页后面，边跑边补，用户不用盯着进度条等六七分钟。
+    ///
+    /// 代价是缩略图要取两次（PHImageManager 的缓存放不下两万张）。多花这几十秒，
+    /// 换来「一分钟就能开始清理」，值。
     func analyze(
         assets: [PHAsset],
         progress: @escaping (_ processed: Int, _ total: Int, _ phase: String) -> Void,
+        onQuickResult: ((AnalysisResult) -> Void)? = nil,
+        refineProgress: ((_ processed: Int, _ total: Int, _ phase: String) -> Void)? = nil,
         completion: @escaping (AnalysisResult) -> Void
     ) {
         DispatchQueue.global(qos: .userInitiated).async {
-            var result = AnalysisResult()
             let total = assets.count
-            let library = PhotoLibraryService.shared
+            let tStart = CFAbsoluteTimeGetCurrent()
 
-            var items: [PhotoItem] = []
-            items.reserveCapacity(total)
+            // ---------- 阶段 1：特征 ----------
+            var items = self.featurePass(assets: assets, progress: progress)
+            let tFeature = CFAbsoluteTimeGetCurrent() - tStart
 
-            // 内容识别分两段，代价差很远：
-            //  - 分类（VNClassifyImageRequest）便宜，全库都跑；
-            //  - OCR 贵得多，所以给整库一个总次数预算，用完就只分类、不读字。
-            // 旧写法是「总资产 > 2 万就整段跳过内容识别」，结果 21478 张照片的库
-            // 连分类都没做：发票恒为 0、内容分类全落进「其他」，界面上还看不出原因。
-            let ocrBudget = 4000
-            var ocrUsed = 0
-            // 细节 OCR：只对「看起来像纸/票」的照片重取 1024px 再读一次。
-            // 预算分两份，见下面 wantsByLabel / wantsByText 的注释。
-            let detailDocBudget = 1200
-            var detailDocUsed = 0
-            let detailTextBudget = 300
-            var detailTextUsed = 0
+            // ---------- 阶段 2：分组 + 打分 → 这里就出货 ----------
+            let tGroupStart = CFAbsoluteTimeGetCurrent()
+            let grouped = self.groupPass(items: items, progress: progress, total: total)
+            let quick = self.assemble(items: items, grouped: grouped, contentReady: false)
+            let tGroup = CFAbsoluteTimeGetCurrent() - tGroupStart
 
-            // 计时：这一版必须能拿出「时间到底花在哪」，否则优化全靠猜。
-            // 结果写进系统日志，用项目里的「手机连电脑诊断.cmd」就能捞出来。
-            var tFeature = 0.0   // 缩略图 + dHash + 清晰度 + 亮度/边缘
-            var tContent = 0.0   // 场景分类 + 小图 OCR
-            var tDetail = 0.0    // 1024px 大图补读
-            var detailCount = 0
-            var memSkips = 0
-            var memoryTight = false
-            let scanStart = CFAbsoluteTimeGetCurrent()
+            NSLog("[PhotoOrganizer][Scan] 阶段一 %d 张 / %.1fs（读取+特征 %.1fs｜分组+打分 %.1fs）",
+                  total, CFAbsoluteTimeGetCurrent() - tStart, tFeature, tGroup)
 
-            // 1) 逐张提取特征 + 内容识别（一次缩略图，算四样东西）
-            for (index, asset) in assets.enumerated() {
-                let isVideo = (asset.mediaType == .video)
+            if let onQuickResult = onQuickResult {
+                DispatchQueue.main.async { onQuickResult(quick) }
+            }
 
-                // 每 200 张看一次还剩多少内存。低于 220 MB 就不再取 1024px 大图：
-                // 大图 + Vision 是整轮里最吃内存的一步，先牺牲它，保住扫描能跑完。
-                if index % 200 == 0 {
-                    memoryTight = MemoryProbe.availableMB() < 220
-                }
+            // ---------- 阶段 3：内容识别（后台） ----------
+            // 换到 .utility 队列：这时候用户多半正在翻结果页、滚缩略图，
+            // 内容识别不该跟界面抢 CPU（userInitiated 是会抢的）。
+            let tContentStart = CFAbsoluteTimeGetCurrent()
+            let refined = DispatchQueue.global(qos: .utility).sync { () -> [PhotoItem] in
+                self.contentPass(items, assets: assets, progress: refineProgress)
+            }
+            items = refined
+            let tContent = CFAbsoluteTimeGetCurrent() - tContentStart
 
-                // 整个循环体套一个自动释放池 —— 这是扫描能不能跑完的关键。
-                // PHImageManager 解码出的图、CGContext、Vision 的中间结果都是自动释放对象，
-                // 而整段分析跑在一个 DispatchQueue 闭包里：闭包不返回，池子就一直不排空。
-                // 2 万张累积下来是几个 GB，系统会中途直接 jetsam 掉进程，
-                // 表现就是「扫到某个百分比突然闪退，相册里还找不到崩溃日志」。
-                autoreleasepool {
-                    var item = PhotoItem(
-                        id: asset.localIdentifier,
-                        asset: asset,
-                        creationDate: asset.creationDate,
-                        pixelWidth: asset.pixelWidth,
-                        pixelHeight: asset.pixelHeight,
-                        isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
-                        isVideo: isVideo
-                    )
-                    item.isFavorite = asset.isFavorite
-                    item.fileSize = library.fileSize(of: asset)
+            // ---------- 阶段 4：内容信号回填后重算 ----------
+            let final = self.assemble(items: items, grouped: grouped, contentReady: true)
 
-                    if !isVideo {
-                        let t0 = CFAbsoluteTimeGetCurrent()
-                        // 320 比原来的 256 多留一点细节，模糊判断才不至于「全都看着挺锐」
-                        if let thumb = library.thumbnail(for: asset, maxPixel: 320) {
-                            item.dHash = self.dHash(from: thumb)
+            NSLog("[PhotoOrganizer][Scan] 阶段二 内容识别 %.1fs｜全流程 %.1fs",
+                  tContent, CFAbsoluteTimeGetCurrent() - tStart)
 
-                            // 清晰度：先做对比度拉伸再算拉普拉斯方差，
-                            // 否则「阴天/室内/夜景」这类低对比照片会被误判成糊片
-                            if let detail = self.sharpnessDetail(from: thumb) {
-                                item.sharpness = detail.lapVar
-                                item.contrastRange = detail.contrast
-                                item.isLowDetail = detail.lowDetail
-                            }
+            DispatchQueue.main.async {
+                completion(final)
+            }
+        }
+    }
 
-                            let st = ContentAnalyzer.shared.stats(from: thumb)
-                            item.brightness = st.brightness
-                            item.edgeDensity = st.edgeDensity
-                            tFeature += CFAbsoluteTimeGetCurrent() - t0
+    // MARK: - 阶段 1：特征
 
-                            let t1 = CFAbsoluteTimeGetCurrent()
-                            let allowOCR = ocrUsed < ocrBudget
-                            let content = ContentAnalyzer.shared.analyze(
-                                image: thumb,
-                                isScreenshot: item.isScreenshot,
-                                allowOCR: allowOCR
-                            )
-                            if content.ranOCR { ocrUsed += 1 }
-                            item.category = content.category
-                            item.contentTags = content.tags
-                            item.ocrHits = content.ocrHits
-                            item.faceCount = content.faceCount
-                            tContent += CFAbsoluteTimeGetCurrent() - t1
+    /// 缩略图 → dHash / 清晰度 / 亮度 / 边缘密度。一个字都不读。
+    private func featurePass(
+        assets: [PHAsset],
+        progress: @escaping (Int, Int, String) -> Void
+    ) -> [PhotoItem] {
+        let library = PhotoLibraryService.shared
+        let total = assets.count
+        var items: [PhotoItem] = []
+        items.reserveCapacity(total)
 
-                            // 320px 的图上，发票的字只有 3~6 像素高，读不出来。
-                            // 所以「看起来像纸/票」，或者「明明读到了字但没命中关键词」的照片，
-                            // 重取一张约 1024px 的图再读一次——这是「发票恒为 0」的正解。
-                            //
-                            // 两份预算分开算：只靠标签命中的那批才是高置信度，
-                            // 靠「读到字」兜底的那批容易一大片（路牌、菜单、包装说明都会被算进来）。
-                            // 混用一个池子的话，相册开头那几十张就能把额度吃干净，后面的发票轮不到。
-                            let wantsByLabel = content.documentLike
-                            let wantsByText = !wantsByLabel && content.textLength >= 12
-                            let hasBudget = (wantsByLabel && detailDocUsed < detailDocBudget)
-                                || (wantsByText && detailTextUsed < detailTextBudget)
+        var tFetch = 0.0   // 取缩略图（解码 + 缩放）
+        var tCalc = 0.0    // 哈希 + 清晰度 + 统计
+        var noThumb = 0
 
-                            if hasBudget && !item.isScreenshot {
-                                if memoryTight {
-                                    memSkips += 1
-                                } else {
-                                    let t2 = CFAbsoluteTimeGetCurrent()
-                                    if let big = library.imageForOCR(for: asset, maxPixel: 1024) {
-                                        if wantsByLabel { detailDocUsed += 1 } else { detailTextUsed += 1 }
-                                        let detail = ContentAnalyzer.shared.ocrOnly(image: big)
-                                        if !detail.receiptHits.isEmpty {
-                                            item.category = .receipt
-                                            item.ocrHits = Array(detail.receiptHits.prefix(4))
-                                        } else if detail.docKeywordHit && item.category == .other {
-                                            item.category = .document
-                                        }
-                                        detailCount += 1
-                                    }
-                                    tDetail += CFAbsoluteTimeGetCurrent() - t2
-                                }
-                            }
-                        } else {
-                            tFeature += CFAbsoluteTimeGetCurrent() - t0
+        for (index, asset) in assets.enumerated() {
+            let isVideo = (asset.mediaType == .video)
+
+            // 逐张套自动释放池：PHImageManager 解出来的图、CGContext 都是自动释放对象，
+            // 整段跑在一个不返回的闭包里，池子一直不排空的话两万张能攒出几个 GB，
+            // 中途被系统 jetsam 掉——表现就是「扫到某个百分比突然闪退，还找不到崩溃日志」。
+            autoreleasepool {
+                var item = PhotoItem(
+                    id: asset.localIdentifier,
+                    asset: asset,
+                    creationDate: asset.creationDate,
+                    pixelWidth: asset.pixelWidth,
+                    pixelHeight: asset.pixelHeight,
+                    isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
+                    isVideo: isVideo
+                )
+                item.isFavorite = asset.isFavorite
+                item.fileSize = library.fileSize(of: asset)
+
+                if !isVideo {
+                    let t0 = CFAbsoluteTimeGetCurrent()
+                    let thumb = library.thumbnail(for: asset, maxPixel: 320)
+                    tFetch += CFAbsoluteTimeGetCurrent() - t0
+
+                    if let thumb = thumb {
+                        let t1 = CFAbsoluteTimeGetCurrent()
+                        item.dHash = self.dHash(from: thumb)
+
+                        // 清晰度：先做对比度拉伸再算拉普拉斯方差，
+                        // 否则「阴天/室内/夜景」这类低对比照片会被误判成糊片
+                        if let detail = self.sharpnessDetail(from: thumb) {
+                            item.sharpness = detail.lapVar
+                            item.contrastRange = detail.contrast
+                            item.isLowDetail = detail.lowDetail
                         }
+
+                        let st = ContentAnalyzer.shared.stats(from: thumb)
+                        item.brightness = st.brightness
+                        item.edgeDensity = st.edgeDensity
+                        tCalc += CFAbsoluteTimeGetCurrent() - t1
+                    } else {
+                        noThumb += 1
                     }
-
-                    items.append(item)
                 }
 
-                if index % 10 == 0 || index == total - 1 {
-                    progress(index + 1, total, "正在识别照片内容")
-                }
+                items.append(item)
             }
 
-            // 第一阶段的耗时构成：一眼就能看出时间是被分类吃掉、还是被大图补读吃掉。
-            let phase1 = CFAbsoluteTimeGetCurrent() - scanStart
-            NSLog("[PhotoOrganizer][Scan] 第一阶段 共 %d 张 / %.1fs｜特征 %.1fs｜分类+小图OCR %.1fs（用了 %d 次）｜大图补读 %.1fs（%d 张，因内存跳过 %d 张）｜无缩略图 %d 张",
-                  total, phase1, tFeature, tContent, ocrUsed, tDetail, detailCount, memSkips,
-                  items.filter { $0.dHash == nil && !$0.isVideo }.count)
-
-            // 1.5) 清晰度参考值：本相册自己的中位数。
-            //      「是否模糊」永远是个相对判断——用同一个人的手机、同一批照片当基准最靠谱。
-            var refs: [Double] = []
-            refs.reserveCapacity(items.count)
-            for it in items where !it.isVideo && !it.isScreenshot && !it.isLowDetail {
-                if let s = it.sharpness, s > 0 {
-                    refs.append(s)
-                }
+            if index % 25 == 0 || index == total - 1 {
+                progress(index + 1, total, "正在读取照片特征")
             }
-            refs.sort()
-            let ref = refs.isEmpty ? 1 : max(1, refs[refs.count / 2])
-            result.blurReference = ref
-            for i in items.indices {
-                if let s = items[i].sharpness {
-                    items[i].sharpnessScore = min(100, 100 * s / ref)
-                }
+        }
+
+        NSLog("[PhotoOrganizer][Scan] 特征 %d 张｜取缩略图 %.1fs｜计算 %.1fs｜取不到缩略图 %d 张",
+              total, tFetch, tCalc, noThumb)
+        return items
+    }
+
+    // MARK: - 阶段 2：分组 + 打分
+
+    /// 分组结果。两个阶段共用：内容识别不会改变「谁和谁重复」，
+    /// 所以只在阶段 2 算一次，阶段 4 直接复用，不重复读两万张原图。
+    private struct Grouped {
+        var duplicateGroups: [PhotoGroup]
+        var similarGroups: [PhotoGroup]
+        var memberIDs: Set<String>
+    }
+
+    private func groupPass(
+        items: [PhotoItem],
+        progress: @escaping (Int, Int, String) -> Void,
+        total: Int
+    ) -> Grouped {
+        progress(total, total, "正在核对完全重复（读取原图，稍慢）")
+        let exact = self.findExactGroups(items: items, progress: progress, total: total)
+        progress(total, total, "正在比对相似照片")
+        let similar = self.findSimilarGroups(items: items, excluding: exact.memberIDs)
+        return Grouped(duplicateGroups: exact.groups, similarGroups: similar, memberIDs: exact.memberIDs)
+    }
+
+    private func assemble(
+        items: [PhotoItem],
+        grouped: Grouped,
+        contentReady: Bool
+    ) -> AnalysisResult {
+        var result = AnalysisResult()
+
+        // 清晰度参考值：本相册自己的中位数。只用特征，两个阶段算出来一样。
+        var refs: [Double] = []
+        refs.reserveCapacity(items.count)
+        for it in items where !it.isVideo && !it.isScreenshot && !it.isLowDetail {
+            if let s = it.sharpness, s > 0 {
+                refs.append(s)
             }
+        }
+        refs.sort()
+        let ref = refs.isEmpty ? 1 : max(1, refs[refs.count / 2])
+        result.blurReference = ref
 
-            // 2) 完全重复（读原图字节核对）
-            progress(total, total, "正在核对完全重复（读取原图，稍慢）")
-            let exact = self.findExactGroups(items: items, progress: progress, total: total)
-            result.duplicateGroups = exact.groups
-
-            // 3) 相似（排除已经是完全重复的）
-            progress(total, total, "正在比对相似照片")
-            result.similarGroups = self.findSimilarGroups(items: items, excluding: exact.memberIDs)
-
-            // 4) 打分：给出「建议清理」及其原因
-            progress(total, total, "正在生成清理建议")
-            let scores = self.buildScores(
-                items: items,
-                duplicates: result.duplicateGroups,
-                similar: result.similarGroups,
-                blurReference: ref
-            )
-
-            for i in items.indices {
-                if let s = scores[items[i].id] {
-                    items[i].cleanupScore = min(1, max(0, s.score))
-                    items[i].cleanupReasons = s.reasons
-                }
+        var scored = items
+        for i in scored.indices {
+            if let s = scored[i].sharpness {
+                scored[i].sharpnessScore = min(100, 100 * s / ref)
             }
+        }
 
-            result.items = items
-            result.videoCount = items.filter { $0.isVideo }.count
-            result.duplicateGroups = self.applyScores(result.duplicateGroups, scores)
-            result.similarGroups = self.applyScores(result.similarGroups, scores)
-
-            // 5) 模糊 / 截图 / 建议 / 分类
-            progress(total, total, "正在整理分类")
-            // 候选池放宽一档，界面上的「宽松/标准/严格」再从这个池子里筛，改灵敏度不用重扫
-            result.blurryItems = items.filter { item in
-                guard !item.isVideo, !item.isScreenshot, !item.isLowDetail,
-                      let s = item.sharpness, s > 0 else { return false }
-                return s < 320 && s / ref < 0.8
+        // 分组里存的快照是阶段 2 拍的，内容识别之后要换回最新的那一条，
+        // 否则发票在「重复」标签里会显示成「其他」。
+        var latest: [String: PhotoItem] = [:]
+        if contentReady {
+            latest.reserveCapacity(scored.count)
+            for it in scored { latest[it.id] = it }
+        }
+        func refresh(_ groups: [PhotoGroup]) -> [PhotoGroup] {
+            guard contentReady else { return groups }
+            return groups.map { group in
+                PhotoGroup(
+                    items: group.items.compactMap { latest[$0.id] },
+                    isExactDuplicate: group.isExactDuplicate
+                )
             }
-            result.screenshotItems = items.filter { item in
-                return !item.isVideo && item.isScreenshot
+        }
+        let dupGroups = refresh(grouped.duplicateGroups)
+        let simGroups = refresh(grouped.similarGroups)
+
+        let scores = self.buildScores(
+            items: scored,
+            duplicates: dupGroups,
+            similar: simGroups,
+            blurReference: ref
+        )
+
+        for i in scored.indices {
+            if let s = scores[scored[i].id] {
+                scored[i].cleanupScore = min(1, max(0, s.score))
+                scored[i].cleanupReasons = s.reasons
             }
+        }
 
-            result.suggestedItems = items
-                .filter { !$0.isVideo && !$0.isFavorite && $0.cleanupScore >= 0.5 }
-                .sorted { $0.cleanupScore > $1.cleanupScore }
+        result.items = scored
+        result.videoCount = scored.filter { $0.isVideo }.count
+        result.duplicateGroups = self.applyScores(dupGroups, scores)
+        result.similarGroups = self.applyScores(simGroups, scores)
 
+        // 候选池放宽一档，界面上的「宽松/标准/严格」再从这个池子里筛，改灵敏度不用重扫
+        result.blurryItems = scored.filter { item in
+            guard !item.isVideo, !item.isScreenshot, !item.isLowDetail,
+                  let s = item.sharpness, s > 0 else { return false }
+            return s < 320 && s / ref < 0.8
+        }
+        result.screenshotItems = scored.filter { item in
+            return !item.isVideo && item.isScreenshot
+        }
+        result.suggestedItems = scored
+            .filter { !$0.isVideo && !$0.isFavorite && $0.cleanupScore >= 0.5 }
+            .sorted { $0.cleanupScore > $1.cleanupScore }
+
+        // 内容没跑完就不出分类：否则「其他 22066」会像 bug 一样挂在结果页上
+        if contentReady {
             var buckets: [ContentCategory: [PhotoItem]] = [:]
-            for item in items where !item.isVideo {
+            for item in scored where !item.isVideo {
                 buckets[item.category, default: []].append(item)
             }
             result.categoryBuckets = buckets
+        }
 
-            DispatchQueue.main.async {
-                completion(result)
+        return result
+    }
+
+    // MARK: - 阶段 3：内容识别
+
+    /// 场景分类 + 发票二维码 + OCR。
+    ///
+    /// 顺序是「先便宜后贵」：分类（几十毫秒）→ 二维码（几毫秒，命中就结束）
+    /// → OCR（几十到几百毫秒）。二维码命中得越多，这一阶段越省时间，
+    /// 而且它判得比关键词硬——机器印的码不会因为反光被读错。
+    ///
+    /// 返回新数组而不是 inout：这样能直接丢到 .utility 队列上跑，不跟界面抢 CPU。
+    private func contentPass(
+        _ items: [PhotoItem],
+        assets: [PHAsset],
+        progress: ((Int, Int, String) -> Void)?
+    ) -> [PhotoItem] {
+        let library = PhotoLibraryService.shared
+        var out = items
+        let total = min(out.count, assets.count)
+
+        // OCR 整库给一个总预算，用完就只分类、不读字
+        let ocrBudget = 3000
+        var ocrUsed = 0
+        // 「像纸/票」的照片重取 1024px 再判一次（二维码 + OCR）的预算
+        let detailDocBudget = 1500
+        var detailDocUsed = 0
+        // 靠「小图上读到字」兜底的那批：容易一大片，单独卡死
+        let detailTextBudget = 200
+        var detailTextUsed = 0
+
+        var qrTried = 0
+        var qrHits = 0
+        var bigCount = 0
+        var memSkips = 0
+        var memoryTight = false
+
+        var tThumb = 0.0
+        var tClassify = 0.0
+        var tQR = 0.0
+        var tOCR = 0.0
+        let start = CFAbsoluteTimeGetCurrent()
+
+        for i in 0..<total {
+            // 每 200 张看一眼还剩多少内存。低于 220 MB 就不再取 1024px 大图：
+            // 大图 + Vision 是整轮最吃内存的一步，先牺牲它，保住这一轮能跑完。
+            if i % 200 == 0 {
+                memoryTight = MemoryProbe.availableMB() < 220
+            }
+
+            autoreleasepool {
+                let item = out[i]
+                guard !item.isVideo else { return }
+                let asset = assets[i]
+
+                let t0 = CFAbsoluteTimeGetCurrent()
+                guard let thumb = library.thumbnail(for: asset, maxPixel: 320) else { return }
+                tThumb += CFAbsoluteTimeGetCurrent() - t0
+
+                let t1 = CFAbsoluteTimeGetCurrent()
+                let content = ContentAnalyzer.shared.classify(image: thumb, isScreenshot: item.isScreenshot)
+                out[i].category = content.category
+                out[i].contentTags = content.tags
+                out[i].faceCount = content.faceCount
+                tClassify += CFAbsoluteTimeGetCurrent() - t1
+
+                // ① 小图上先扫一眼二维码。截图里的发票、离得近拍的发票，320px 也常读得出；
+                //    命中就到此为止，既不用取大图也不用读字。
+                if content.documentLike || item.isScreenshot {
+                    qrTried += 1
+                    let t2 = CFAbsoluteTimeGetCurrent()
+                    let info = ContentAnalyzer.shared.invoiceQR(in: thumb)
+                    tQR += CFAbsoluteTimeGetCurrent() - t2
+                    if let info = info {
+                        qrHits += 1
+                        out[i].category = .receipt
+                        out[i].ocrHits = info.hits
+                        return
+                    }
+                }
+
+                // ② 「像纸/票」的照片：重取 1024px，先二维码、再读字。
+                //    320px 上发票的字只有 3~6 像素高，读不出「发票/价税合计」，
+                //    这是「发票恒为 0」的正解。
+                if content.documentLike && !item.isScreenshot {
+                    if memoryTight || detailDocUsed >= detailDocBudget {
+                        if memoryTight { memSkips += 1 }
+                    } else if let big = library.imageForOCR(for: asset, maxPixel: 1024) {
+                        detailDocUsed += 1
+                        bigCount += 1
+
+                        let t3 = CFAbsoluteTimeGetCurrent()
+                        let info = ContentAnalyzer.shared.invoiceQR(in: big)
+                        tQR += CFAbsoluteTimeGetCurrent() - t3
+                        if let info = info {
+                            qrHits += 1
+                            out[i].category = .receipt
+                            out[i].ocrHits = info.hits
+                            return
+                        }
+
+                        let t4 = CFAbsoluteTimeGetCurrent()
+                        let detail = ContentAnalyzer.shared.ocrOnly(image: big)
+                        tOCR += CFAbsoluteTimeGetCurrent() - t4
+                        if !detail.receiptHits.isEmpty {
+                            out[i].category = .receipt
+                            out[i].ocrHits = Array(detail.receiptHits.prefix(4))
+                            return
+                        }
+                        if detail.docKeywordHit && out[i].category == .other {
+                            out[i].category = .document
+                        }
+                    }
+                }
+
+                // ③ 其余「有字的东西」：在 320px 小图上读一次（菜单、路牌、聊天截图…）
+                if content.textLike && ocrUsed < ocrBudget {
+                    ocrUsed += 1
+                    let t5 = CFAbsoluteTimeGetCurrent()
+                    let detail = ContentAnalyzer.shared.ocrOnly(image: thumb)
+                    tOCR += CFAbsoluteTimeGetCurrent() - t5
+
+                    if !detail.receiptHits.isEmpty {
+                        out[i].category = .receipt
+                        out[i].ocrHits = Array(detail.receiptHits.prefix(4))
+                        return
+                    }
+                    if detail.docKeywordHit && out[i].category == .other && !item.isScreenshot {
+                        out[i].category = .document
+                    }
+
+                    // 小图上读到了字却没命中票据关键词 —— 很可能是分辨率不够的发票。
+                    // 再给一次 1024px 的机会，但这条路径最容易一大片，预算卡得很紧。
+                    if detail.textLength >= 20 && !item.isScreenshot
+                        && !memoryTight && detailTextUsed < detailTextBudget {
+                        if let big = library.imageForOCR(for: asset, maxPixel: 1024) {
+                            detailTextUsed += 1
+                            bigCount += 1
+
+                            let t6 = CFAbsoluteTimeGetCurrent()
+                            let info = ContentAnalyzer.shared.invoiceQR(in: big)
+                            tQR += CFAbsoluteTimeGetCurrent() - t6
+                            if let info = info {
+                                qrHits += 1
+                                out[i].category = .receipt
+                                out[i].ocrHits = info.hits
+                                return
+                            }
+
+                            let t7 = CFAbsoluteTimeGetCurrent()
+                            let more = ContentAnalyzer.shared.ocrOnly(image: big)
+                            tOCR += CFAbsoluteTimeGetCurrent() - t7
+                            if !more.receiptHits.isEmpty {
+                                out[i].category = .receipt
+                                out[i].ocrHits = Array(more.receiptHits.prefix(4))
+                            }
+                        }
+                    }
+                }
+            }
+
+            if i % 20 == 0 || i == total - 1 {
+                progress?(i + 1, total, "正在识别发票与内容分类")
             }
         }
+
+        NSLog("[PhotoOrganizer][Scan] 内容识别 %d 张 / %.1fs｜取图 %.1fs｜分类 %.1fs｜二维码 %.1fs（试 %d 次，命中 %d）｜OCR %.1fs（%d 次，大图 %d 张，因内存跳过 %d 张）",
+              total, CFAbsoluteTimeGetCurrent() - start, tThumb, tClassify,
+              tQR, qrTried, qrHits, tOCR, ocrUsed, bigCount, memSkips)
+
+        return out
     }
 
     // MARK: - 清理建议打分

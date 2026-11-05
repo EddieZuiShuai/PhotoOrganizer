@@ -10,6 +10,28 @@ enum AppPhase {
     case done
 }
 
+/// 第二阶段（内容识别）的进度。
+///
+/// 单独做成 ObservableObject 是有原因的：这个数字每几十毫秒变一次，
+/// 如果它放在 ContentView 的 @State 里，每变一次整个结果页（两万多条）都要重建一遍，
+/// 滚动会明显卡。让那一条横幅自己订阅，就只重画横幅本身。
+final class RefineStatus: ObservableObject {
+    @Published var done: Int = 0
+    @Published var total: Int = 0
+    @Published var phaseText: String = ""
+
+    var percent: Int {
+        guard total > 0 else { return 0 }
+        return min(100, Int(Double(done) / Double(total) * 100))
+    }
+
+    func reset(to total: Int) {
+        done = 0
+        self.total = total
+        phaseText = ""
+    }
+}
+
 struct ContentView: View {
     @State private var phase: AppPhase = .idle
     @State private var result: AnalysisResult?
@@ -18,6 +40,12 @@ struct ContentView: View {
     @State private var processed: Int = 0
     @State private var total: Int = 0
     @State private var errorMessage: String?
+    /// 第一阶段的结果已经到了、内容识别还在后台跑
+    @State private var isRefining = false
+    @StateObject private var refine = RefineStatus()
+    /// 每一次重新扫描 +1。后台回调回来先对号：防止「已经重开一局了，
+    /// 上一局的结果页又自己弹回来」。
+    @State private var scanID = 0
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
@@ -37,7 +65,12 @@ struct ContentView: View {
                     )
                 case .done:
                     if let result = result {
-                        ResultView(result: result, onRestart: reset)
+                        ResultView(
+                            result: result,
+                            isRefining: isRefining,
+                            refineStatus: refine,
+                            onRestart: reset
+                        )
                     } else {
                         HomeView(onStart: startScan)
                     }
@@ -57,8 +90,11 @@ struct ContentView: View {
         // 扫描期间禁止自动锁屏。
         // 锁屏 = 应用被挂起，正在解码的图和排队的 Vision 请求会被系统掐断；
         // 用户解锁回来往往只能从头再扫一遍。这里跟着 phase 开关，进出后台也会重新算。
-        .onChange(of: phase) { newPhase in
-            ScreenAwake.shared.setScanning(newPhase == .scanning)
+        .onChange(of: phase) { _ in
+            syncScreenAwake()
+        }
+        .onChange(of: isRefining) { _ in
+            syncScreenAwake()
         }
         .onChange(of: scenePhase) { newPhase in
             ScreenAwake.shared.setAppActive(newPhase == .active)
@@ -72,12 +108,21 @@ struct ContentView: View {
     }
 
     private func reset() {
+        scanID += 1
         result = nil
         phase = .idle
+        isRefining = false
+        refine.reset(to: 0)
         progressValue = 0
         progressText = ""
         processed = 0
         total = 0
+    }
+
+    /// 屏幕常亮的条件：正在扫，或者结果页已经出来了但后台还在识别。
+    /// 后台识别同样怕锁屏——一锁屏应用就被挂起，进度停在那儿，解锁回来还得接着等。
+    private func syncScreenAwake() {
+        ScreenAwake.shared.setScanning(phase == .scanning || isRefining)
     }
 
     private func startScan() {
@@ -100,16 +145,34 @@ struct ContentView: View {
             progressText = "准备开始…"
             phase = .scanning
 
+            let myID = scanID
+
             AnalysisEngine.shared.analyze(assets: assets) { done, all, text in
                 DispatchQueue.main.async {
+                    guard scanID == myID else { return }
                     processed = done
                     total = all
                     progressText = text
                     progressValue = all > 0 ? Double(done) / Double(all) : 0
                 }
-            } completion: { res in
-                result = res
+            } onQuickResult: { quick in
+                // 这一步已经回到主线程（引擎里做了 async）
+                guard scanID == myID else { return }
+                result = quick
+                refine.reset(to: assets.count)
+                isRefining = true
                 phase = .done
+            } refineProgress: { done, all, text in
+                DispatchQueue.main.async {
+                    guard scanID == myID else { return }
+                    refine.done = done
+                    refine.total = all
+                    refine.phaseText = text
+                }
+            } completion: { res in
+                guard scanID == myID else { return }
+                result = res
+                isRefining = false
             }
         }
     }
@@ -331,7 +394,7 @@ struct ScanningView: View {
                 .font(.system(size: 13))
                 .foregroundColor(.secondary)
 
-            Text("这次多了一步「内容识别」，照片多的话会比之前慢一些\n别锁屏、别切走")
+            Text("先算重复和模糊，很快就能出结果\n发票和分类会在结果页后台继续，不耽误先看")
                 .font(.system(size: 12))
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
@@ -407,6 +470,9 @@ final class BlurIgnoreStore {
 
 struct ResultView: View {
     let result: AnalysisResult
+    /// 内容识别还在后台跑（发票、分类还没出来）
+    let isRefining: Bool
+    let refineStatus: RefineStatus
     let onRestart: () -> Void
 
     /// 全量 id → 照片。跨分类选中、跨分类删除都靠它，保证「切分类不丢选中」。
@@ -469,8 +535,15 @@ struct ResultView: View {
     @State private var ignoredBlurIDs: Set<String> = BlurIgnoreStore.shared.all()
     @State private var lastLongPressAt: Date = .distantPast
 
-    init(result: AnalysisResult, onRestart: @escaping () -> Void) {
+    init(
+        result: AnalysisResult,
+        isRefining: Bool = false,
+        refineStatus: RefineStatus = RefineStatus(),
+        onRestart: @escaping () -> Void
+    ) {
         self.result = result
+        self.isRefining = isRefining
+        self.refineStatus = refineStatus
         self.onRestart = onRestart
         var map: [String: PhotoItem] = [:]
         map.reserveCapacity(result.items.count)
@@ -827,8 +900,14 @@ struct ResultView: View {
             HStack(spacing: 8) {
                 summaryItem(title: "建议清理", value: "\(suggested.count)", color: Color(red: 0.85, green: 0.25, blue: 0.2))
                 summaryItem(title: "重复组", value: "\(dupGroups.count)", color: Color(red: 0.85, green: 0.45, blue: 0.15))
-                summaryItem(title: "发票", value: "\(receiptCount)", color: Color(red: 0.2, green: 0.55, blue: 0.4))
+                // 内容识别没跑完之前，发票数还不知道——写 0 会被当成「又是 0 张发票」，
+                // 所以显式给一个「还没数完」的符号。
+                summaryItem(title: "发票", value: isRefining ? "…" : "\(receiptCount)", color: Color(red: 0.2, green: 0.55, blue: 0.4))
                 summaryItem(title: "截图", value: "\(shots.count)", color: Color(red: 0.4, green: 0.45, blue: 0.5))
+            }
+
+            if isRefining {
+                RefineBanner(status: refineStatus)
             }
 
             if !selectedIDs.isEmpty {
@@ -1876,6 +1955,43 @@ struct ResultView: View {
         }
 
         return lines.joined(separator: "\n")
+    }
+}
+
+// MARK: - 后台内容识别的进度条
+
+/// 结果页顶上那一条「正在识别发票与分类」。
+///
+/// 它自己订阅进度对象，所以百分比每变一次只重画这一行，
+/// 不会把下面两万多条的列表一起刷新。
+struct RefineBanner: View {
+    @ObservedObject var status: RefineStatus
+
+    var body: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .scaleEffect(0.55)
+                .frame(width: 16, height: 16)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(status.total > 0
+                     ? "正在识别发票与分类 \(status.percent)%（\(status.done)/\(status.total)）"
+                     : "正在识别发票与分类…")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(.primary)
+
+                Text("重复、相似、模糊已经算完，可以先动手；识别完会自动补上发票和分类")
+                    .font(.system(size: 10))
+                    .foregroundColor(.secondary)
+                    .lineLimit(2)
+            }
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
+        .background(Color(red: 0.18, green: 0.49, blue: 0.96).opacity(0.08))
+        .cornerRadius(8)
     }
 }
 

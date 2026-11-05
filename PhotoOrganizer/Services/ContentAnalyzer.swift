@@ -128,12 +128,29 @@ final class ContentAnalyzer {
     // MARK: - 内容识别
 
     func analyze(image: UIImage, isScreenshot: Bool, allowOCR: Bool = true) -> Content {
+        var out = classify(image: image, isScreenshot: isScreenshot)
+        guard allowOCR, out.textLike, let cgImage = image.cgImage else { return out }
+
+        let orientation = Self.orientation(from: image.imageOrientation)
+        let fullText = recognizeText(cgImage: cgImage, orientation: orientation)
+        out.ranOCR = true
+        out.textLength = fullText.count
+        applyKeywords(fullText, isScreenshot: isScreenshot, to: &out)
+        return out
+    }
+
+    // MARK: - 只分类（不读字）
+
+    /// 只跑场景分类 + 人脸，一个字都不读。
+    ///
+    /// 两阶段扫描里，「这张要不要多取一张大图」必须先知道它像不像纸/票，
+    /// 而读字是整条链路上最贵的一步。把分类单独拆出来，代价只有几十毫秒。
+    func classify(image: UIImage, isScreenshot: Bool) -> Content {
         var out = Content()
         guard let cgImage = image.cgImage else { return out }
 
         let orientation = Self.orientation(from: image.imageOrientation)
 
-        // 第一步：场景分类 + 人脸（一次 perform 完成，省时间）
         let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
         let classifyRequest = VNClassifyImageRequest()
         let faceRequest = VNDetectFaceRectanglesRequest()
@@ -155,57 +172,65 @@ final class ContentAnalyzer {
         out.faceCount = faceRequest.results?.count ?? 0
         out.tags = labels.prefix(4).map { Self.chineseName(for: $0.name) }
 
-        // 第二步：只在「可能含文字」时才跑 OCR，避免每张都读字
         out.textLike = isScreenshot || labels.contains { item in
             textLikeLabels.contains { item.name.contains($0) }
         }
         out.documentLike = labels.contains { item in
             documentLabels.contains { item.name.contains($0) }
         }
-        let needsOCR = allowOCR && out.textLike
-        out.ranOCR = needsOCR
+        out.category = Self.category(from: labels, faceCount: out.faceCount, isScreenshot: isScreenshot)
+        return out
+    }
 
-        var fullText = ""
-        if needsOCR {
-            fullText = recognizeText(cgImage: cgImage, orientation: orientation)
-            out.textLength = fullText.count
+    /// 只看场景标签时的归类（顺序即优先级）。
+    /// 读字之后如果命中票据/文档关键词，`applyKeywords` 会把它顶掉。
+    private static func category(
+        from labels: [(name: String, conf: Double)],
+        faceCount: Int,
+        isScreenshot: Bool
+    ) -> ContentCategory {
+        if isScreenshot { return .screenshot }
+
+        if hasAny(labels, ["document", "paper", "book", "newspaper", "magazine", "whiteboard", "web page", "spreadsheet", "form", "letter", "page"]) {
+            return .document
         }
+        if hasAny(labels, ["food", "dish", "cuisine", "meal", "dessert", "pizza", "sushi", "cake", "bread", "fruit", "coffee", "menu", "noodle", "hot pot"]) {
+            return .food
+        }
+        if hasAny(labels, ["mountain", "beach", "sky", "sunset", "sunrise", "landscape", "sea", "ocean", "forest", "lake", "cloud", "snow", "field", "waterfall", "river"]) {
+            return .scenery
+        }
+        if hasAny(labels, ["dog", "cat", "puppy", "kitten", "pet", "animal", "bird", "fish", "hamster"]) {
+            return .pet
+        }
+        if faceCount > 0 || hasAny(labels, ["person", "people", "portrait", "selfie", "human", "face", "child", "man", "woman", "baby"]) {
+            return .person
+        }
+        if hasAny(labels, ["cartoon", "illustration", "clip art", "graphic design", "comic", "drawing", "logo", "emoticon"]) {
+            return .meme
+        }
+        return .other
+    }
 
-        // 第三步：关键词命中
+    /// 关键词命中 → 覆盖分类。优先级和以前完全一致：票据 > 截图 > 文档 > 标签。
+    private func applyKeywords(_ text: String, isScreenshot: Bool, to out: inout Content) {
         var receiptHits: [String] = []
-        for key in receiptKeywords where fullText.contains(key.lowercased()) {
+        for key in receiptKeywords where text.contains(key.lowercased()) {
             if !receiptHits.contains(key) { receiptHits.append(key) }
-        }
-        var docHits = 0
-        for key in docKeywords where fullText.contains(key.lowercased()) {
-            docHits += 1
         }
         out.ocrHits = Array(receiptHits.prefix(4))
 
-        // 第四步：归类（顺序即优先级）
         if !receiptHits.isEmpty {
             out.category = .receipt
-        } else if isScreenshot {
-            out.category = .screenshot
-        } else if docHits > 0 {
-            out.category = .document
-        } else if hasAny(labels, ["document", "paper", "book", "newspaper", "magazine", "whiteboard", "web page", "spreadsheet", "form", "letter", "page"]) {
-            out.category = .document
-        } else if hasAny(labels, ["food", "dish", "cuisine", "meal", "dessert", "pizza", "sushi", "cake", "bread", "fruit", "coffee", "menu", "noodle", "hot pot"]) {
-            out.category = .food
-        } else if hasAny(labels, ["mountain", "beach", "sky", "sunset", "sunrise", "landscape", "sea", "ocean", "forest", "lake", "cloud", "snow", "field", "waterfall", "river"]) {
-            out.category = .scenery
-        } else if hasAny(labels, ["dog", "cat", "puppy", "kitten", "pet", "animal", "bird", "fish", "hamster"]) {
-            out.category = .pet
-        } else if out.faceCount > 0 || hasAny(labels, ["person", "people", "portrait", "selfie", "human", "face", "child", "man", "woman", "baby"]) {
-            out.category = .person
-        } else if hasAny(labels, ["cartoon", "illustration", "clip art", "graphic design", "comic", "drawing", "logo", "emoticon"]) {
-            out.category = .meme
-        } else {
-            out.category = .other
+            return
         }
-
-        return out
+        if isScreenshot {
+            out.category = .screenshot
+            return
+        }
+        if docKeywords.contains(where: { text.contains($0.lowercased()) }) {
+            out.category = .document
+        }
     }
 
     // MARK: - 只读字（给大图补读用）
@@ -256,9 +281,143 @@ final class ContentAnalyzer {
         return parts.joined(separator: " ").lowercased()
     }
 
+    // MARK: - 发票二维码
+
+    /// 发票二维码解析出来的字段（只留界面上用得着的几项）
+    struct InvoiceInfo {
+        /// 发票代码（12 位；数电票没有这一栏）
+        var code = ""
+        /// 发票号码（8 位；数电票 20 位）
+        var number = ""
+        /// 金额（原样字符串）
+        var amount = ""
+        /// 开票日期 YYYYMMDD
+        var date = ""
+        /// 直接塞进界面「识别到：…」那一行
+        var hits: [String] = []
+    }
+
+    /// 在图片里找发票二维码。
+    ///
+    /// 为什么值得单独做：纸质发票、电子发票上那枚码是机器印的，不像手写字那样
+    /// 受光线和角度影响；而 `VNDetectBarcodes` 是毫秒级的，比 OCR 便宜一个数量级。
+    /// 命中就直接判定为发票，连读字都省了。
+    func invoiceQR(in image: UIImage) -> InvoiceInfo? {
+        guard let cgImage = image.cgImage else { return nil }
+
+        let request = VNDetectBarcodesRequest()
+        // 只找发票/票据可能用的三种，不收 code128 之类，省时间也少误判
+        request.symbologies = [.qr, .dataMatrix, .pdf417]
+
+        let handler = VNImageRequestHandler(
+            cgImage: cgImage,
+            orientation: Self.orientation(from: image.imageOrientation),
+            options: [:]
+        )
+        do {
+            try handler.perform([request])
+        } catch {
+            return nil
+        }
+
+        guard let results = request.results else { return nil }
+        for obs in results {
+            guard let payload = obs.payloadStringValue, !payload.isEmpty else { continue }
+            if let info = Self.parseInvoicePayload(payload) { return info }
+        }
+        return nil
+    }
+
+    /// 解析国标发票二维码。
+    ///
+    /// 格式（《电子凭证入账要求 第 2 部分》附录 D）是逗号分隔的一串：
+    ///   版本号(01) , 类型(10/11/32…) , 发票代码(12位) , 发票号码(8位 或 数电20位) ,
+    ///   金额 , 开票日期(YYYYMMDD) , 校验码后6位(可空) , CRC16(可空)
+    ///
+    /// 但各家开票平台实际吐出来的字段数并不一致：数电票没有 12 位代码那一栏，
+    /// 有的把校验码整段省掉。所以这里**不按固定下标取**，而是按「长得像什么」逐个认，
+    /// 只要求：以 01 开头 + 有一个合法日期 + 有一个号码或代码。
+    /// 这样网址、WiFi、名片这类二维码一个都不会被误判成发票。
+    static func parseInvoicePayload(_ raw: String) -> InvoiceInfo? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = text.split(separator: ",", omittingEmptySubsequences: false)
+            .map { String($0).trimmingCharacters(in: .whitespaces) }
+        guard parts.count >= 5, parts[0] == "01" else { return nil }
+
+        var ids8: [(index: Int, value: String)] = []
+        var longIDs: [String] = []
+        var codes: [String] = []
+        var amounts: [String] = []
+
+        for (index, token) in parts.enumerated() where index > 0 {
+            guard !token.isEmpty, token.allSatisfy({ $0.isNumber || $0 == "." }) else { continue }
+
+            if token.contains(".") {
+                if let v = Double(token), v > 0, v < 1_000_000_000 {
+                    amounts.append(token)
+                }
+                continue
+            }
+
+            switch token.count {
+            case 8:
+                ids8.append((index, token))
+            case 20:
+                longIDs.append(token)
+            case 10, 12:
+                codes.append(token)
+            default:
+                break
+            }
+        }
+
+        // 日期：8 位串里「像日期」的那一个。字段顺序中号码在日期之前，所以取最后一个。
+        guard let dateToken = ids8.last(where: { Self.isValidDateToken($0.value) }) else {
+            return nil
+        }
+
+        var info = InvoiceInfo()
+        info.date = dateToken.value
+        info.code = codes.first ?? ""
+        info.number = longIDs.first
+            ?? (ids8.first(where: { $0.index != dateToken.index })?.value ?? "")
+        info.amount = amounts.first ?? ""
+
+        // 号码和代码总得有一个，否则「01 + 一个日期」也太巧了
+        guard !info.number.isEmpty || !info.code.isEmpty else { return nil }
+
+        var hits = ["二维码发票"]
+        if let value = Double(info.amount) {
+            hits.append(String(format: "¥%.2f", value))
+        }
+        if let readable = Self.readableDate(info.date) {
+            hits.append(readable)
+        }
+        info.hits = hits
+        return info
+    }
+
+    /// YYYYMMDD → 2024-11-20（只做格式转换，不建 Calendar）
+    private static func readableDate(_ token: String) -> String? {
+        guard token.count == 8 else { return nil }
+        let y = token.prefix(4)
+        let m = token.dropFirst(4).prefix(2)
+        let d = token.suffix(2)
+        return "\(y)-\(m)-\(d)"
+    }
+
+    /// 只用来认「这 8 位数会不会是开票日期」，所以给一个宽松但足够用的范围。
+    private static func isValidDateToken(_ token: String) -> Bool {
+        guard token.count == 8, token.allSatisfy({ $0.isNumber }) else { return false }
+        guard let year = Int(token.prefix(4)),
+              let month = Int(token.dropFirst(4).prefix(2)),
+              let day = Int(token.suffix(2)) else { return false }
+        return year >= 2000 && year <= 2035 && month >= 1 && month <= 12 && day >= 1 && day <= 31
+    }
+
     // MARK: - 辅助
 
-    private func hasAny(_ labels: [(name: String, conf: Double)], _ keys: [String]) -> Bool {
+    private static func hasAny(_ labels: [(name: String, conf: Double)], _ keys: [String]) -> Bool {
         for label in labels {
             for key in keys where label.name.contains(key) {
                 return true
