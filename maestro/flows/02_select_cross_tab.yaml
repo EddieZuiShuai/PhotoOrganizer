@@ -1,0 +1,30 @@
+appId: com.eddie.photoorganizer
+name: 02 选中与跨分类保留
+---
+- runFlow: ../subflows/scan.yaml
+
+# 大文件页选第一张
+- tapOn: "大文件.*"
+- tapOn:
+    text: "照片 .*"
+    index: 0
+- assertVisible: "已选 1 张.*"
+
+# 切到「建议清理」再切回来，选中不能丢
+- tapOn: "建议清理.*"
+- assertVisible: "已选 1 张.*"
+- tapOn: "大文件.*"
+- assertVisible: "已选 1 张.*"
+
+# 再选第二张，计数变 2
+- tapOn:
+    text: "照片 .*"
+    index: 1
+- assertVisible: "已选 2 张.*"
+- takeScreenshot: 03_cross_tab
+
+# 再点第一张取消，只剩 1
+- tapOn:
+    text: "照片 .*"
+    index: 0
+- assertVisible: "已选 1 张.*"

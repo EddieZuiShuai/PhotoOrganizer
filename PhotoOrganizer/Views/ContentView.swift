@@ -1348,6 +1348,11 @@ struct ResultView: View {
             lastLongPressAt = Date()
             open(item, in: list)
         }
+        // 给自动化测试和 VoiceOver 一个稳定的名字：点它 = 选中这张
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("照片 " + item.displayName)
+        .accessibilityIdentifier("cell-" + item.displayName)
+        .accessibilityAddTraits(.isButton)
     }
 
     /// 方形缩略图 + 选中态（蓝底 + 白框 + 右下角勾）
@@ -1802,6 +1807,10 @@ struct SelectableThumb: View {
         .contentShape(RoundedRectangle(cornerRadius: 8))
         .onTapGesture(perform: onToggle)
         .onLongPressGesture(minimumDuration: 0.35, perform: onOpen)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("照片 " + item.displayName)
+        .accessibilityIdentifier("thumb-" + item.displayName)
+        .accessibilityAddTraits(.isButton)
     }
 }
 

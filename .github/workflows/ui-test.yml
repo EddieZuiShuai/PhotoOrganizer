@@ -1,0 +1,127 @@
+name: UI Tests (Maestro)
+
+# 手动触发为主；等流程稳定后再打开 push 自动跑。
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: uitest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui-test:
+    name: iOS Simulator
+    runs-on: macos-15
+    timeout-minutes: 45
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 显示环境
+        run: |
+          xcodebuild -version
+          java -version 2>&1 | head -3
+
+      - name: 选一台 iPhone 模拟器并启动
+        id: sim
+        run: |
+          UDID=$(python3 - <<'PY'
+          import json, re, subprocess
+          data = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"]))
+          cands = []
+          for runtime, devs in data["devices"].items():
+              m = re.search(r"iOS-(\d+)-(\d+)", runtime)
+              if not m:
+                  continue
+              ver = (int(m.group(1)), int(m.group(2)))
+              for d in devs:
+                  if d.get("isAvailable") and d["name"].startswith("iPhone"):
+                      cands.append((ver, d["name"], d["udid"]))
+          if not cands:
+              raise SystemExit("没有可用的 iPhone 模拟器")
+          cands.sort(reverse=True)
+          print(cands[0][2])
+          PY
+          )
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+          xcrun simctl list devices | grep -i booted
+
+      - name: 编译模拟器版
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project PhotoOrganizer.xcodeproj \
+            -scheme PhotoOrganizer \
+            -configuration Debug \
+            -sdk iphonesimulator \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: 安装并灌入测试照片
+        run: |
+          APP=$(find build/Build/Products/Debug-iphonesimulator -maxdepth 1 -name '*.app' | head -1)
+          echo "APP=$APP"
+          xcrun simctl install "${{ steps.sim.outputs.udid }}" "$APP"
+          xcrun simctl privacy "${{ steps.sim.outputs.udid }}" grant photos com.eddie.photoorganizer || true
+          xcrun simctl addmedia "${{ steps.sim.outputs.udid }}" UITestFixtures/*.jpg
+          echo "已导入 $(ls UITestFixtures/*.jpg | wc -l) 张测试照片"
+
+      - name: 安装 Maestro
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          "$HOME/.maestro/bin/maestro" --version
+
+      - name: 跑 UI 用例
+        id: test
+        run: |
+          export PATH="$HOME/.maestro/bin:$PATH"
+          export MAESTRO_DRIVER_STARTUP_TIMEOUT=240000
+          mkdir -p build/maestro-results
+          set +e
+          maestro test \
+            --test-output-dir build/maestro-results \
+            --flat-output \
+            --format junit \
+            --output build/maestro-report.xml \
+            maestro/flows
+          CODE=$?
+          echo "exit_code=$CODE" >> "$GITHUB_OUTPUT"
+          echo "Maestro exit code: $CODE"
+          exit 0
+
+      - name: 检查「滑过之后图片真的换了」
+        if: always()
+        run: |
+          if [ -f build/maestro-results/04_triage_first.png ] && [ -f build/maestro-results/05_triage_second.png ]; then
+            python3 -m venv .venv-shots
+            .venv-shots/bin/pip install --quiet pillow
+            .venv-shots/bin/python scripts/check_triage_shots.py \
+              build/maestro-results/04_triage_first.png \
+              build/maestro-results/05_triage_second.png
+          else
+            echo "没有拿到对比截图，跳过像素校验"
+            ls -R build/maestro-results || true
+          fi
+
+      - name: 上传报告与截图
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: maestro-results
+          path: |
+            build/maestro-report.xml
+            build/maestro-results
+          retention-days: 14
+
+      - name: 用例失败时让任务变红
+        if: always()
+        run: |
+          echo "Maestro exit: ${{ steps.test.outputs.exit_code }}"
+          if [ "${{ steps.test.outputs.exit_code }}" != "0" ]; then
+            exit 1
+          fi

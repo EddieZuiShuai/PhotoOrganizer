@@ -1,0 +1,19 @@
+appId: com.eddie.photoorganizer
+name: 01 启动与扫描
+---
+- runFlow: ../subflows/scan.yaml
+
+- assertVisible: "建议清理"
+- assertVisible: "逐张过"
+- assertVisible: "空间"
+- takeScreenshot: 01_result
+
+# 空间看板：六个数字都要出来
+- tapOn: "空间"
+- assertVisible: "相册总共占用"
+- assertVisible: "已释放"
+- assertVisible: "重复可省"
+- assertVisible: "占用分布"
+- takeScreenshot: 02_dashboard
+- tapOn: "关闭"
+- assertVisible: "逐张过"

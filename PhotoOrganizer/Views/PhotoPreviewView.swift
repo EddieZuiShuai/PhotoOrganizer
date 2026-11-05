@@ -477,6 +477,7 @@ struct PhotoPreviewView: View {
                     .background(Circle().fill(Color.black.opacity(0.45)))
             }
             .accessibilityLabel("关闭")
+            .accessibilityIdentifier("preview-close")
 
             Spacer()
 
@@ -612,6 +613,7 @@ struct PhotoPreviewView: View {
             .buttonStyle(.plain)
             .disabled(current == nil)
             .accessibilityLabel(marked ? "取消标记待删" : "标记待删")
+            .accessibilityIdentifier("preview-mark")
 
             Button {
                 deleteNow()
@@ -633,6 +635,7 @@ struct PhotoPreviewView: View {
             .buttonStyle(.plain)
             .disabled(current == nil)
             .accessibilityLabel("立即删除")
+            .accessibilityIdentifier("preview-delete")
         }
         .padding(.horizontal, 16)
         .padding(.bottom, 26)

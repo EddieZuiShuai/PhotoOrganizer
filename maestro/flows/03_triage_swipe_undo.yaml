@@ -1,0 +1,43 @@
+appId: com.eddie.photoorganizer
+name: 03 逐张过：首滑、连划、撤销
+---
+- runFlow: ../subflows/scan.yaml
+
+# 用大文件页（12 张）做逐张过，样本足够
+- tapOn: "大文件.*"
+- tapOn: "逐张过"
+- assertVisible: "左滑删 · 右滑留"
+- assertVisible: "1 / 12"
+- waitForAnimationToEnd
+- takeScreenshot: 04_triage_first
+
+# 第一下左滑就必须换图（v1.4 主修复）
+- swipe:
+    start: "85%,55%"
+    end: "15%,55%"
+    duration: 400
+- assertVisible: "2 / 12"
+- waitForAnimationToEnd
+- takeScreenshot: 05_triage_second
+
+# 撤销要退回第 1 张
+- tapOn:
+    id: "triage-undo"
+- assertVisible: "1 / 12"
+
+# 左滑 = 标记删除
+- tapOn:
+    id: "triage-delete"
+- assertVisible: "2 / 12"
+- assertVisible: "已标 1"
+
+# 右滑 = 保留，不计数
+- tapOn:
+    id: "triage-keep"
+- assertVisible: "3 / 12"
+- assertVisible: "已标 1"
+
+# 再撤一步，回到第 2 张
+- tapOn:
+    id: "triage-undo"
+- assertVisible: "2 / 12"

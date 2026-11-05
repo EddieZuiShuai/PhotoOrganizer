@@ -1,0 +1,8 @@
+# 共用：启动 App 并等扫描跑完
+# 由主 flow 提供 appId
+- launchApp
+- assertVisible: "开始扫描"
+- tapOn: "开始扫描"
+- extendedWaitUntil:
+    visible: "逐张过"
+    timeout: 180000

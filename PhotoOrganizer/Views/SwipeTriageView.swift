@@ -202,6 +202,7 @@ struct SwipeTriageView: View {
                     .frame(width: 38, height: 38)
                     .background(Circle().fill(Color.white.opacity(0.14)))
             }
+            .accessibilityLabel("关闭逐张过")
 
             Spacer()
 
@@ -270,10 +271,12 @@ struct SwipeTriageView: View {
                         .overlay(alignment: .topLeading) {
                             stamp("保留", color: Color(red: 0.25, green: 0.8, blue: 0.48))
                                 .opacity(isTop ? rightProgress : 0)
+                                .accessibilityHidden(true)
                         }
                         .overlay(alignment: .topTrailing) {
                             stamp("删除", color: Color(red: 0.96, green: 0.33, blue: 0.27))
                                 .opacity(isTop ? leftProgress : 0)
+                                .accessibilityHidden(true)
                         }
                         .offset(
                             x: isTop ? currentOffset.width : 0,
@@ -411,15 +414,15 @@ struct SwipeTriageView: View {
 
     private var actionButtons: some View {
         HStack(spacing: 24) {
-            roundButton(icon: "arrow.uturn.backward", label: "撤销",
+            roundButton(icon: "arrow.uturn.backward", label: "撤销", key: "undo",
                         bg: Color.white.opacity(0.14), enabled: !history.isEmpty && !busy) {
                 undo()
             }
-            roundButton(icon: "checkmark", label: "保留",
+            roundButton(icon: "checkmark", label: "保留", key: "keep",
                         bg: Color(red: 0.2, green: 0.62, blue: 0.36), enabled: !busy) {
                 commit(keep: true)
             }
-            roundButton(icon: "trash", label: "删除",
+            roundButton(icon: "trash", label: "删除", key: "delete",
                         bg: Color(red: 0.85, green: 0.24, blue: 0.2), enabled: !busy) {
                 commit(keep: false)
             }
@@ -427,7 +430,7 @@ struct SwipeTriageView: View {
         .padding(.top, 6)
     }
 
-    private func roundButton(icon: String, label: String, bg: Color, enabled: Bool, action: @escaping () -> Void) -> some View {
+    private func roundButton(icon: String, label: String, key: String, bg: Color, enabled: Bool, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             VStack(spacing: 4) {
                 Image(systemName: icon)
@@ -443,6 +446,8 @@ struct SwipeTriageView: View {
         .foregroundColor(.white)
         .opacity(enabled ? 1 : 0.35)
         .disabled(!enabled)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier("triage-" + key)
     }
 
     private var finishButtons: some View {
@@ -460,6 +465,7 @@ struct SwipeTriageView: View {
                                 : Color(red: 0.85, green: 0.24, blue: 0.2))
                     .cornerRadius(12)
             }
+            .accessibilityIdentifier("triage-finish")
 
             if !history.isEmpty {
                 Button {
