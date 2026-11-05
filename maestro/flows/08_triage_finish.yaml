@@ -10,10 +10,10 @@ name: 08 逐张过：连续标记后关掉，标记要带回列表
 # 连划四张：删、删、留、留 —— 每划一次都确认计数器真的前进了。
 # 这样万一某一下被 busy 锁吞掉，失败会停在准确的位置。
 - tapOn:
-    id: "triage-delete"
+    id: "triage-mark"
 - assertVisible: "2 / [0-9]+"
 - tapOn:
-    id: "triage-delete"
+    id: "triage-mark"
 - assertVisible: "3 / [0-9]+"
 - assertVisible: "已标 2"
 - takeScreenshot: 14_triage_mid

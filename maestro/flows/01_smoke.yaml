@@ -8,12 +8,15 @@ name: 01 启动与扫描
 - assertVisible: "空间"
 - takeScreenshot: 01_result
 
-# 空间看板：六个数字都要出来
-- tapOn: "空间"
+# 空间看板：六个数字都要出来。build 20 起它是底部第二个 tab，不再是 sheet。
+- tapOn:
+    id: "tab-space"
+- assertVisible: "空间看板"
 - assertVisible: "相册总共占用"
 - assertVisible: "已释放"
 - assertVisible: "重复可省"
 - assertVisible: "占用分布"
 - takeScreenshot: 02_dashboard
-- tapOn: "关闭"
+- tapOn:
+    id: "tab-clean"
 - assertVisible: "逐张过"

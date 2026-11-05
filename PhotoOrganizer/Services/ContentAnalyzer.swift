@@ -190,13 +190,40 @@ final class ContentAnalyzer {
         out.documentLike = labels.contains { item in
             Self.documentLabels.contains { item.name.contains($0) }
         }
+
+        // 场景分类给出的 dog / cat 标签是「顺带看见的」：狗在远处、猫缩在沙发角落时，
+        // 置信度经常只有 0.1~0.3，抓不住。VNRecognizeAnimalsRequest 是专门为猫狗训练的，
+        // 同样条件下召回明显更高，而且 iOS 13 就有，不挑系统版本。
+        // 只对「已经闻到动物味」的图补跑，不给全库加成本。
+        let animalSmell = labels.contains { item in
+            ["dog", "cat", "puppy", "kitten", "pet", "animal"].contains { item.name.contains($0) }
+        }
+        let hasAnimal = animalSmell && detectAnimal(cgImage: cgImage, orientation: orientation)
+
         out.category = Self.category(
             from: labels,
             faceCount: out.faceCount,
             faceArea: out.faceArea,
-            isScreenshot: isScreenshot
+            isScreenshot: isScreenshot,
+            hasAnimal: hasAnimal
         )
         return out
+    }
+
+    /// 专用动物模型只认猫和狗（系统目前就这两个 identifier），但认得比场景分类准。
+    private func detectAnimal(cgImage: CGImage, orientation: CGImagePropertyOrientation) -> Bool {
+        let req = VNRecognizeAnimalsRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
+        guard (try? handler.perform([req])) != nil else { return false }
+
+        for obs in req.results ?? [] {
+            for label in obs.labels where label.confidence >= 0.5 {
+                if label.identifier == VNAnimalIdentifierDog || label.identifier == VNAnimalIdentifierCat {
+                    return true
+                }
+            }
+        }
+        return false
     }
 
     /// 只看场景标签时的归类（顺序即优先级）。
@@ -210,7 +237,8 @@ final class ContentAnalyzer {
         from labels: [(name: String, conf: Double)],
         faceCount: Int,
         faceArea: Double,
-        isScreenshot: Bool
+        isScreenshot: Bool,
+        hasAnimal: Bool = false
     ) -> ContentCategory {
         if isScreenshot { return .screenshot }
 
@@ -228,6 +256,13 @@ final class ContentAnalyzer {
         }
         if strongDoc {
             return .document
+        }
+
+        // ③ 专用动物模型认出来的，直接归宠物。
+        //    放在 food / scenery 前面：猫趴在草地上、狗在沙滩上，场景标签会先命中
+        //    grass / beach，宠物分类永远轮不到——这是「宠物组里空空的」主要原因。
+        if hasAnimal {
+            return .pet
         }
 
         if hasAny(labels, ["food", "dish", "cuisine", "meal", "dessert", "pizza", "sushi", "cake", "bread", "fruit", "coffee", "menu", "noodle", "hot pot"]) {
@@ -534,47 +569,167 @@ final class ContentAnalyzer {
         }
     }
 
-    // MARK: - 隐私粗筛
+    // MARK: - 隐私粗筛（v2：排除人脸 + 裸露密度）
 
-    /// 隐私照片粗筛：**人体占比 × 肤色占比**。
+    /// 判定线。改这个数之前先看 `docs/architecture.md` 的「隐私」一节。
+    static let privacyThreshold: Double = 0.42
+
+    /// 便宜的闸门：只算肤色占比（96×96 采样，亚毫秒级），用来决定要不要跑人体分割。
     ///
-    /// 两条硬约束：全程在本机算，不保存任何中间图、不上传、不进日志。
-    /// 只做粗筛，宁可漏也不能错标——误标一张普通照片的代价，比漏掉一张大得多。
+    /// 为什么要单独暴露：v1 只在「有脸」时才做隐私判定，于是**没露脸的身体照永远进不了隐私组**——
+    /// 那恰恰是最该被保护的一类。现在改成「有脸 or 皮肤多」都进闸门，
+    /// 真正决定命运的仍然是后面的分割与密度。
+    func skinRatioOfImage(_ image: UIImage) -> Double {
+        guard let cgImage = Self.uprightCGImage(image) else { return 0 }
+        guard let rgb = rgbPixels(cgImage: cgImage, side: 96) else { return 0 }
+        return skinRatio(rgb)
+    }
+
+    /// 把 EXIF 方向「烤」进像素，得到一张方向已经正确的 CGImage。
     ///
-    /// 为什么不是只看肤色：木地板、沙滩、暖光下的墙都能骗过单纯的肤色统计。
-    /// 先要求「画面里有成片的人体」（Vision 人体分割），再在这张图上算肤色比例，
-    /// 两个条件同时成立才给分。
-    func privacyScore(image: UIImage) -> Double {
-        guard let cgImage = image.cgImage else { return 0 }
+    /// 为什么必须做：肤色统计是自己拿 CGContext 画像素，如果不处理 orientation，
+    /// 读到的就是**未旋转**的原始像素；而 Vision 的人脸框、人体 mask 都是按
+    /// `orientation` 校正后的坐标。竖拍照片两边正好差 90°——"排除人脸"会排除到
+    /// 画面边上，等于没排除，自拍照样过线。
+    static func uprightCGImage(_ image: UIImage) -> CGImage? {
+        guard let src = image.cgImage else { return nil }
+        guard image.imageOrientation != .up else { return src }
+        let size = image.size
+        guard size.width >= 1, size.height >= 1 else { return src }
 
-        // ① 肤色占比。低于 12% 直接出局，连分割都不用跑——省掉大部分开销。
-        let skin = skinRatio(cgImage: cgImage)
-        guard skin > 0.12 else { return 0 }
+        let format = UIGraphicsImageRendererFormat.default()
+        format.scale = 1
+        format.opaque = true
+        let renderer = UIGraphicsImageRenderer(size: size, format: format)
+        let fixed = renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: size))
+        }
+        return fixed.cgImage ?? src
+    }
 
-        // ② 人体占比
-        var bodyRatio = 0.0
-        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:])
+    /// 隐私照片粗筛 v2：**排除人脸之后，人体区域里还剩下多少皮肤**。
+    ///
+    /// v1 错在哪：它算的是「画面里皮肤多不多 × 有没有人」。自拍和半身照天然同时满足这两条——
+    /// 脸本来就是画面里最大的一块皮肤，肩膀和手臂又把「人体占比」顶到 0.3 以上，
+    /// 于是每一张普通自拍都能过线。用户说的「隐私组里全是人像」就是这么来的。
+    ///
+    /// v2 换成一个比值：
+    /// **裸露密度 = 人体区域内、且不在脸上的肤色像素 ÷ 同一区域的总像素**
+    ///
+    /// - 穿衣服的人：分子只剩手、脖子、锁骨，分母是整个人（连衣服一起），密度通常 < 0.2；
+    /// - 裸露的躯干：分子几乎等于分母，密度 > 0.5。
+    ///
+    /// 比值天然不怕「人占画面多大」——这正是 v1 用乘法姿势时最容易被放大的地方。
+    /// 再乘一个绝对量系数兜底：只有一只手在画面角落时，密度再高也不算。
+    ///
+    /// 全程在本机算，不保存中间图、不上传、不进日志。
+    func privacyScore(image: UIImage, skin: Double? = nil) -> Double {
+        guard let cgImage = Self.uprightCGImage(image) else { return 0 }
+        let side = 96
+
+        // ① 肤色闸门。低于 10% 连分割都不用跑——省掉绝大部分开销。
+        let skinAll = skin ?? skinRatioOfImage(image)
+        guard skinAll > 0.10 else { return 0 }
+
+        // ② 人脸：先认出来，后面统计时整块跳过。
+        //    方向已经烤进像素了，这里统一用 .up，和下面 mask / 肤色图同一个坐标系。
+        let faces = faceBoxes(cgImage: cgImage, orientation: .up)
+
+        // ③ 人体分割
+        guard let mask = bodyMask(cgImage: cgImage, orientation: .up, side: side) else { return 0 }
+        var bodyPixels = 0
+        for v in mask where v > 128 { bodyPixels += 1 }
+        guard Double(bodyPixels) / Double(side * side) > 0.06 else { return 0 }
+
+        // ④ 肤色像素（与 mask 同一套 96×96 网格）
+        guard let rgb = rgbPixels(cgImage: cgImage, side: side) else { return 0 }
+
+        // ⑤ 只在「人体内、且不在脸上」的区域里数
+        var denom = 0
+        var skinInBody = 0
+        for y in 0..<side {
+            for x in 0..<side {
+                let i = y * side + x
+                guard mask[i] > 128 else { continue }
+                if isInsideFace(x: x, y: y, side: side, faces: faces) { continue }
+                denom += 1
+                if isSkin(rgb, offset: i * 4) { skinInBody += 1 }
+            }
+        }
+
+        // 人被裁得只剩一只手：分母太小，密度没有统计意义
+        guard denom >= (side * side) / 40 else { return 0 }
+
+        let density = Double(skinInBody) / Double(denom)
+        let absolute = Double(skinInBody) / Double(side * side)
+        // 4% 画面 ≈ 一块躯干的下限；低于它按比例打折，避免「局部放大」骗过阈值
+        let sizeFactor = min(1, absolute / 0.04)
+        return min(1, density * sizeFactor)
+    }
+
+    /// 人脸框（归一化，原点左下），已经外扩一圈。
+    ///
+    /// Vision 的脸框只包住五官：额头、下巴、耳朵、脖子都还在框外。
+    /// 不外扩的话，这些边缘像素会被算成「裸露皮肤」，自拍仍然过线。
+    private func faceBoxes(cgImage: CGImage, orientation: CGImagePropertyOrientation) -> [CGRect] {
+        let req = VNDetectFaceRectanglesRequest()
+        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
+        guard (try? handler.perform([req])) != nil else { return [] }
+
+        return (req.results ?? []).map { face in
+            let b = face.boundingBox
+            let dx = b.width * 0.18
+            let dy = b.height * 0.18
+            return CGRect(
+                x: b.minX - dx,
+                y: b.minY - dy,
+                width: b.width + dx * 2,
+                height: b.height + dy * 2
+            )
+        }
+    }
+
+    /// 人体分割 mask，重采样到 side×side 的灰度数组（0~255）。
+    ///
+    /// 行序说明：CGBitmapContext / CVPixelBuffer 的**第 0 行都是视觉上的底部**，
+    /// 与 Vision 的归一化坐标（原点左下）一致，所以这里不做上下翻转。
+    private func bodyMask(
+        cgImage: CGImage,
+        orientation: CGImagePropertyOrientation,
+        side: Int
+    ) -> [UInt8]? {
         let seg = VNGeneratePersonSegmentationRequest()
         seg.qualityLevel = .fast
         seg.outputPixelFormat = kCVPixelFormatType_OneComponent8
-        do {
-            try handler.perform([seg])
-            if let obs = seg.results?.first {
-                bodyRatio = Self.maskRatio(obs.pixelBuffer)
-            }
-        } catch {
-            return 0
-        }
-        guard bodyRatio > 0.10 else { return 0 }
 
-        // 3.2 是个经验系数：单看肤色约 0.3~0.5（正常露脸照片也会到），
-        // 乘上人体占比之后，普通生活照落在 0.05~0.15，才拉得开差距。
-        return min(1, skin * bodyRatio * 3.2)
+        let handler = VNImageRequestHandler(cgImage: cgImage, orientation: orientation, options: [:])
+        guard (try? handler.perform([seg])) != nil,
+              let obs = seg.results?.first else { return nil }
+
+        let buffer = obs.pixelBuffer
+        CVPixelBufferLockBaseAddress(buffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return nil }
+
+        let w = CVPixelBufferGetWidth(buffer)
+        let h = CVPixelBufferGetHeight(buffer)
+        let rowBytes = CVPixelBufferGetBytesPerRow(buffer)
+        guard w > 0, h > 0 else { return nil }
+
+        var out = [UInt8](repeating: 0, count: side * side)
+        for y in 0..<side {
+            let sy = min(h - 1, y * h / side)
+            let row = base.advanced(by: sy * rowBytes).assumingMemoryBound(to: UInt8.self)
+            for x in 0..<side {
+                let sx = min(w - 1, x * w / side)
+                out[y * side + x] = row[sx]
+            }
+        }
+        return out
     }
 
-    /// 肤色像素占全图比例。RGB 规则来自常见的肤色检测阈值，粗糙但够用。
-    private func skinRatio(cgImage: CGImage) -> Double {
-        let side = 96
+    /// RGBA 像素缓冲（不翻转，第 0 行 = 视觉底部，与 Vision 坐标一致）
+    private func rgbPixels(cgImage: CGImage, side: Int) -> [UInt8]? {
         var pixels = [UInt8](repeating: 0, count: side * side * 4)
         let ok: Bool = pixels.withUnsafeMutableBytes { buffer -> Bool in
             guard let base = buffer.baseAddress,
@@ -591,43 +746,32 @@ final class ContentAnalyzer {
             ctx.draw(cgImage, in: CGRect(x: 0, y: 0, width: side, height: side))
             return true
         }
-        guard ok else { return 0 }
-
-        var hit = 0
-        for i in stride(from: 0, to: pixels.count, by: 4) {
-            let r = Int(pixels[i])
-            let g = Int(pixels[i + 1])
-            let b = Int(pixels[i + 2])
-            let mx = max(r, max(g, b))
-            let mn = min(r, min(g, b))
-            if r > 95, g > 40, b > 20, mx - mn > 15, abs(r - g) > 15, r > g, r > b {
-                hit += 1
-            }
-        }
-        return Double(hit) / Double(side * side)
+        return ok ? pixels : nil
     }
 
-    /// 人体分割 mask 里「是人」的像素占比。每 4 个像素采一个，够用且快。
-    private static func maskRatio(_ buffer: CVPixelBuffer) -> Double {
-        CVPixelBufferLockBaseAddress(buffer, .readOnly)
-        defer { CVPixelBufferUnlockBaseAddress(buffer, .readOnly) }
-        guard let base = CVPixelBufferGetBaseAddress(buffer) else { return 0 }
+    private func isInsideFace(x: Int, y: Int, side: Int, faces: [CGRect]) -> Bool {
+        guard !faces.isEmpty else { return false }
+        let fx = (Double(x) + 0.5) / Double(side)
+        let fy = (Double(y) + 0.5) / Double(side)
+        for f in faces where f.contains(CGPoint(x: fx, y: fy)) { return true }
+        return false
+    }
 
-        let w = CVPixelBufferGetWidth(buffer)
-        let h = CVPixelBufferGetHeight(buffer)
-        let rowBytes = CVPixelBufferGetBytesPerRow(buffer)
-        guard w > 0, h > 0 else { return 0 }
-
+    /// 肤色像素占全图比例。RGB 规则来自常见的肤色检测阈值，粗糙但够用。
+    private func skinRatio(_ pixels: [UInt8]) -> Double {
         var hit = 0
-        var total = 0
-        let step = 4
-        for y in stride(from: 0, to: h, by: step) {
-            let row = base.advanced(by: y * rowBytes).assumingMemoryBound(to: UInt8.self)
-            for x in stride(from: 0, to: w, by: step) {
-                if row[x] > 128 { hit += 1 }
-                total += 1
-            }
+        for i in stride(from: 0, to: pixels.count, by: 4) {
+            if isSkin(pixels, offset: i) { hit += 1 }
         }
-        return total > 0 ? Double(hit) / Double(total) : 0
+        return Double(hit) / Double(pixels.count / 4)
+    }
+
+    private func isSkin(_ pixels: [UInt8], offset: Int) -> Bool {
+        let r = Int(pixels[offset])
+        let g = Int(pixels[offset + 1])
+        let b = Int(pixels[offset + 2])
+        let mx = max(r, max(g, b))
+        let mn = min(r, min(g, b))
+        return r > 95 && g > 40 && b > 20 && mx - mn > 15 && abs(r - g) > 15 && r > g && r > b
     }
 }

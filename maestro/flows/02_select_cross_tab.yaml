@@ -16,8 +16,10 @@ name: 02 选中与跨分类保留
 - tapOn: "重复 [0-9]+"
 - assertVisible: "已选 1 张.*"
 
-# 大文件这个标签在 iPhone SE 上被挤到屏幕外，只能从空间看板回去
-- tapOn: "空间"
+# 大文件这个标签在 iPhone SE 上被挤到屏幕外，只能从空间看板回去。
+# build 20 起「空间」是底部 tab。
+- tapOn:
+    id: "tab-space"
 - tapOn: "去看大文件.*"
 - assertVisible: "已选 1 张.*"
 

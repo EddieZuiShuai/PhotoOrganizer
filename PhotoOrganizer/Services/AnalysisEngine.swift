@@ -382,14 +382,16 @@ final class AnalysisEngine {
                 out[i].faceArea = content.faceArea
                 tClassify += CFAbsoluteTimeGetCurrent() - t1
 
-                // ⓪ 隐私粗筛：只对「有脸」的照片跑。
-                //    人体分割是这一段里除 OCR 外最贵的，全库跑会把时间翻倍；
-                //    而没有人脸的照片本来也不在目标范围内。
-                if content.faceCount > 0 || content.faceArea > 0.05 {
+                // ⓪ 隐私粗筛：先用「肤色」做一道几乎零成本的闸门（96×96 采样，亚毫秒）。
+                //    v1 只在「有脸」时才判，结果没露脸的身体照永远进不了隐私组；
+                //    v2 让「有脸 或 皮肤够多」都进闸门，真正的判定交给
+                //    privacyScore 里的「排除人脸 + 裸露密度」。
+                let skin = ContentAnalyzer.shared.skinRatioOfImage(thumb)
+                if content.faceCount > 0 || content.faceArea > 0.05 || skin > 0.12 {
                     let tP = CFAbsoluteTimeGetCurrent()
-                    let score = ContentAnalyzer.shared.privacyScore(image: thumb)
+                    let score = ContentAnalyzer.shared.privacyScore(image: thumb, skin: skin)
                     out[i].privacyScore = score
-                    if score >= 0.34 {
+                    if score >= ContentAnalyzer.privacyThreshold {
                         out[i].category = .privacy
                         tClassify += CFAbsoluteTimeGetCurrent() - tP
                         return

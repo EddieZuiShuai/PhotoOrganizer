@@ -143,17 +143,23 @@ struct SpaceDashboardView: View {
     let categoryRows: [CatRow]
     let onGoLarge: () -> Void
 
-    @Environment(\.dismiss) private var dismiss
-
     var body: some View {
-        NavigationStack {
-            ScrollView {
-                VStack(spacing: 14) {
+        ScrollView {
+            VStack(spacing: 14) {
 
-                    VStack(spacing: 4) {
-                        Text("相册总共占用")
-                            .font(.system(size: 12))
-                            .foregroundColor(.secondary)
+                // 以前这是一个 sheet，标题靠系统的 navigationTitle；
+                // 改成底部 tab 之后没有导航栏了，标题自己画。
+                HStack {
+                    Text("空间看板")
+                        .font(.system(size: 20, weight: .semibold))
+                    Spacer()
+                }
+                .padding(.top, 6)
+
+                VStack(spacing: 4) {
+                    Text("相册总共占用")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
                         Text(byteText(totalBytes))
                             .font(.system(size: 34, weight: .semibold))
                         Text("照片 \(byteText(photoBytes)) · 视频 \(byteText(videoBytes))")
@@ -186,8 +192,7 @@ struct SpaceDashboardView: View {
                     .cornerRadius(14)
 
                     Button {
-                        dismiss()
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { onGoLarge() }
+                        onGoLarge()
                     } label: {
                         Text("去看大文件（可压视频）")
                             .font(.system(size: 15, weight: .semibold))
@@ -204,19 +209,10 @@ struct SpaceDashboardView: View {
                         .multilineTextAlignment(.center)
                         .padding(.horizontal, 8)
                         .padding(.bottom, 20)
-                }
-                .padding(16)
             }
-            .background(Color(red: 0.96, green: 0.96, blue: 0.97))
-            .navigationTitle("空间看板")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("关闭") { dismiss() }
-                }
-            }
+            .padding(16)
         }
-        .presentationDetents([.large])
+        .background(Color(red: 0.96, green: 0.96, blue: 0.97))
     }
 
     private func statCard(title: String, value: String, sub: String, color: Color) -> some View {

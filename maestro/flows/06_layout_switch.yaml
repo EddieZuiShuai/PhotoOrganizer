@@ -21,7 +21,8 @@ name: 06 布局三档切换 + 分组页隐藏布局按钮
 # 布局选择会记住：切成单列 → 冷启动 → 回到大文件页，应该还是单列
 - tapOn: "单列"
 - runFlow: ../subflows/scan.yaml
-- tapOn: "空间"
+- tapOn:
+    id: "tab-space"
 - tapOn: "去看大文件.*"
 - extendedWaitUntil:
     visible: "按体积从大到小.*"

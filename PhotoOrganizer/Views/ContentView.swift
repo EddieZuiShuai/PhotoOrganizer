@@ -65,7 +65,7 @@ struct ContentView: View {
                     )
                 case .done:
                     if let result = result {
-                        ResultView(
+                        MainTabView(
                             result: result,
                             isRefining: isRefining,
                             refineStatus: refine,
@@ -488,6 +488,14 @@ struct ResultView: View {
     let isRefining: Bool
     let refineStatus: RefineStatus
     let onRestart: () -> Void
+    /// 切到底部「空间」tab。header 上那个「空间」按钮用它。
+    let onOpenSpace: () -> Void
+
+    /// 已删的照片。提到 MainTabView 里是因为「空间」tab 也要读它算释放量；
+    /// 放在这里的话，切一次 tab 就丢了。
+    @Binding var deletedIDs: Set<String>
+    /// 从「分类」tab 点某张卡片跳过来时，指定要打开哪个标签。
+    @Binding var requestedTab: ResultTab?
 
     /// 全量 id → 照片。跨分类选中、跨分类删除都靠它，保证「切分类不丢选中」。
     private let itemIndex: [String: PhotoItem]
@@ -498,7 +506,6 @@ struct ResultView: View {
 
     @State private var tab: ResultTab = .suggested
     @State private var selectedIDs: Set<String> = []
-    @State private var deletedIDs: Set<String> = []
 
     /// 用「要预览的对象」来控制弹出，而不是 Bool + 三个并列状态。
     /// 后者在第一次弹出时会拿到尚未更新的空数组（SwiftUI 的呈现内容按快照捕获），
@@ -536,7 +543,6 @@ struct ResultView: View {
     @State private var showFilter = false
 
     // 附加面板
-    @State private var showDashboard = false
     @State private var triage: TriageRequest?
 
     // 视频压缩
@@ -553,12 +559,18 @@ struct ResultView: View {
         result: AnalysisResult,
         isRefining: Bool = false,
         refineStatus: RefineStatus = RefineStatus(),
+        deletedIDs: Binding<Set<String>>,
+        requestedTab: Binding<ResultTab?>,
+        onOpenSpace: @escaping () -> Void = {},
         onRestart: @escaping () -> Void
     ) {
         self.result = result
         self.isRefining = isRefining
         self.refineStatus = refineStatus
         self.onRestart = onRestart
+        self.onOpenSpace = onOpenSpace
+        self._deletedIDs = deletedIDs
+        self._requestedTab = requestedTab
         var map: [String: PhotoItem] = [:]
         map.reserveCapacity(result.items.count)
         for item in result.items {
@@ -619,7 +631,9 @@ struct ResultView: View {
                 Text(bulkConfirmMessage)
             }
         }
-        .overlay(alignment: .bottom) {
+        // safeAreaInset 而不是 overlay：底部多了一条 tab bar 之后，
+        // overlay 会直接压在 tab 上（两个都贴底），safeAreaInset 会把内容区先让出来。
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             bottomArea
         }
         .overlay {
@@ -666,24 +680,29 @@ struct ResultView: View {
         .sheet(isPresented: $showFilter) {
             FilterSheet(period: $period, album: $albumChoice, albums: albumOptions)
         }
-        .sheet(isPresented: $showDashboard) {
-            SpaceDashboardView(
-                totalBytes: totalBytes,
-                photoBytes: photoBytes,
-                videoBytes: videoBytes,
-                suggestedBytes: suggestedBytes,
-                duplicateWasteBytes: duplicateWasteBytes,
-                freedBytes: freedBytes,
-                deletedCount: deletedIDs.count,
-                categoryRows: categoryRows,
-                onGoLarge: { tab = .large }
+        .sheet(item: $triage) { request in
+            SwipeTriageView(
+                title: request.title,
+                items: request.items,
+                onFinish: { marks in
+                    guard !marks.isEmpty else { return }
+                    selectedIDs.formUnion(marks)
+                    showToast("已标记 \(marks.count) 张，点下面红色按钮统一删除")
+                },
+                onDeleteNow: { item in
+                    // 逐张过里点「删除」= 真删。这里只负责落到相册，
+                    // 卡片自己会从列表里拿掉，不需要再回到结果页刷新。
+                    deleteItems([item])
+                }
             )
         }
-        .sheet(item: $triage) { request in
-            SwipeTriageView(title: request.title, items: request.items) { marks in
-                guard !marks.isEmpty else { return }
-                selectedIDs.formUnion(marks)
-                showToast("已标记 \(marks.count) 张，点下面红色按钮统一删除")
+        .onChange(of: requestedTab) { value in
+            guard let value = value else { return }
+            tab = value
+            // 清空要延后一帧：在 onChange 里直接写回 binding 会触发
+            // 「Modifying state during view update」的紫条警告。
+            DispatchQueue.main.async {
+                requestedTab = nil
             }
         }
         .onAppear(perform: loadAlbums)
@@ -852,54 +871,8 @@ struct ResultView: View {
     }
 
     // MARK: 体积统计（空间看板用）
-
-    private var totalBytes: Int64 {
-        result.items.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
-    }
-
-    private var photoBytes: Int64 {
-        result.items.filter { !$0.isVideo }.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
-    }
-
-    private var videoBytes: Int64 {
-        result.items.filter { $0.isVideo }.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
-    }
-
-    private var suggestedBytes: Int64 {
-        suggested.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
-    }
-
-    private var duplicateWasteBytes: Int64 {
-        dupGroups.reduce(Int64(0)) { partial, group in
-            let total = group.items.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
-            let keep = group.items.first.map { max(0, $0.fileSize) } ?? 0
-            return partial + max(0, total - keep)
-        }
-    }
-
-    private var freedBytes: Int64 {
-        deletedIDs.reduce(Int64(0)) { partial, id in
-            partial + max(0, itemIndex[id]?.fileSize ?? 0)
-        }
-    }
-
-    private var categoryRows: [CatRow] {
-        var bytes: [ContentCategory: Int64] = [:]
-        var counts: [ContentCategory: Int] = [:]
-        for item in result.items where !item.isVideo && !deletedIDs.contains(item.id) {
-            bytes[item.category, default: 0] += max(0, item.fileSize)
-            counts[item.category, default: 0] += 1
-        }
-        var rows: [CatRow] = bytes.map { key, value in
-            CatRow(id: key.rawValue, title: key.rawValue, bytes: value, count: counts[key] ?? 0)
-        }
-        rows.sort { $0.bytes > $1.bytes }
-        var out = Array(rows.prefix(6))
-        if videoBytes > 0 {
-            out.insert(CatRow(id: "video", title: "视频", bytes: videoBytes, count: result.videoCount), at: 0)
-        }
-        return out
-    }
+    // 口径统一放在 SpaceStats 里：底部多了「空间」tab 之后，这块数据有两个读者
+    // （结果页的 sheet、独立的 tab），逻辑留两份迟早会算出两个数。
 
     // MARK: 顶部
 
@@ -911,7 +884,7 @@ struct ResultView: View {
                     .foregroundColor(.secondary)
                     .lineLimit(1)
                 Spacer(minLength: 4)
-                headerButton(icon: "chart.pie.fill", text: "空间") { showDashboard = true }
+                headerButton(icon: "chart.pie.fill", text: "空间") { onOpenSpace() }
                 headerButton(icon: "line.3.horizontal.decrease", text: "筛选") { showFilter = true }
                 headerButton(icon: "hand.draw.fill", text: "逐张过") { startTriage() }
             }
@@ -1661,18 +1634,21 @@ struct ResultView: View {
     // MARK: 底部操作栏
 
     private var bottomArea: some View {
-        VStack(spacing: 0) {
-            if let toast = toast {
-                Text(toast)
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 9)
-                    .background(Capsule().fill(Color.black.opacity(0.78)))
-                    .padding(.bottom, 10)
+        // toast 用 overlay 挂在按钮区顶部，而不是和按钮一起排进 safeAreaInset：
+        // safeAreaInset 是布局的一部分，toast 一出现一消失会把整页内容顶得上下跳。
+        bottomBar
+            .overlay(alignment: .top) {
+                if let toast = toast {
+                    Text(toast)
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 9)
+                        .background(Capsule().fill(Color.black.opacity(0.78)))
+                        .offset(y: -44)
+                        .allowsHitTesting(false)
+                }
             }
-            bottomBar
-        }
     }
 
     private var bottomBar: some View {
@@ -2259,5 +2235,366 @@ final class ScreenAwake {
         } else {
             DispatchQueue.main.async(execute: body)
         }
+    }
+}
+
+// MARK: - 底部 Tab（build 20）
+
+enum MainTab: String, CaseIterable, Identifiable {
+    case clean = "清理"
+    case categories = "分类"
+    case space = "空间"
+    case me = "我的"
+
+    var id: String { rawValue }
+
+    /// 给 UI 用例用的稳定标识。故意用 ASCII：Maestro 里按 id 定位，
+    /// 中文标签随时可能改，id 不能跟着改。
+    var key: String {
+        switch self {
+        case .clean: return "clean"
+        case .categories: return "categories"
+        case .space: return "space"
+        case .me: return "me"
+        }
+    }
+
+    var icon: String {
+        switch self {
+        case .clean: return "sparkles"
+        case .categories: return "square.grid.2x2"
+        case .space: return "internaldrive"
+        case .me: return "person.crop.circle"
+        }
+    }
+}
+
+/// 结果页 + 空间 + 分类 + 我的，四个页面共用一份状态。
+///
+/// 为什么不用系统 `TabView`：它会在切走的一瞬间销毁页面，
+/// `selectedIDs` / 滚动位置 / 筛选条件全丢——而「切分类不丢选中」是这个 App 承诺过的行为。
+/// 这里用 ZStack + opacity 让四个页面常驻，切换只是显隐。
+struct MainTabView: View {
+    let result: AnalysisResult
+    let isRefining: Bool
+    let refineStatus: RefineStatus
+    let onRestart: () -> Void
+
+    @State private var tab: MainTab = .clean
+    @State private var deletedIDs: Set<String> = []
+    @State private var requestedTab: ResultTab?
+
+    var body: some View {
+        ZStack {
+            ResultView(
+                result: result,
+                isRefining: isRefining,
+                refineStatus: refineStatus,
+                deletedIDs: $deletedIDs,
+                requestedTab: $requestedTab,
+                onOpenSpace: { tab = .space },
+                onRestart: onRestart
+            )
+            .opacity(tab == .clean ? 1 : 0)
+            .allowsHitTesting(tab == .clean)
+            .accessibilityHidden(tab != .clean)
+
+            CategoryOverviewView(result: result) { category in
+                requestedTab = .content(category)
+                tab = .clean
+            }
+            .opacity(tab == .categories ? 1 : 0)
+            .allowsHitTesting(tab == .categories)
+            .accessibilityHidden(tab != .categories)
+
+            SpaceDashboardView(
+                totalBytes: stats.totalBytes,
+                photoBytes: stats.photoBytes,
+                videoBytes: stats.videoBytes,
+                suggestedBytes: stats.suggestedBytes,
+                duplicateWasteBytes: stats.duplicateWasteBytes,
+                freedBytes: stats.freedBytes,
+                deletedCount: stats.deletedCount,
+                categoryRows: stats.categoryRows,
+                onGoLarge: {
+                    requestedTab = .large
+                    tab = .clean
+                }
+            )
+            .opacity(tab == .space ? 1 : 0)
+            .allowsHitTesting(tab == .space)
+            .accessibilityHidden(tab != .space)
+
+            SettingsTabView(onRestart: onRestart, photoCount: result.items.count)
+                .opacity(tab == .me ? 1 : 0)
+                .allowsHitTesting(tab == .me)
+                .accessibilityHidden(tab != .me)
+        }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            MainTabBar(selection: $tab)
+        }
+    }
+
+    private var stats: SpaceStats {
+        SpaceStats(result: result, deletedIDs: deletedIDs)
+    }
+}
+
+// MARK: - 底部 tab bar
+
+struct MainTabBar: View {
+    @Binding var selection: MainTab
+
+    private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
+
+    var body: some View {
+        HStack(spacing: 0) {
+            ForEach(MainTab.allCases) { item in
+                Button {
+                    selection = item
+                } label: {
+                    VStack(spacing: 3) {
+                        Image(systemName: item.icon)
+                            .font(.system(size: 18, weight: selection == item ? .semibold : .regular))
+                        Text(item.rawValue)
+                            .font(.system(size: 10, weight: .medium))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .foregroundColor(selection == item ? blue : Color.secondary)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(item.rawValue)
+                .accessibilityIdentifier("tab-" + item.key)
+            }
+        }
+        .padding(.top, 9)
+        .padding(.bottom, 2)
+        .background(
+            Color.white
+                .overlay(alignment: .top) {
+                    Rectangle()
+                        .fill(Color.black.opacity(0.07))
+                        .frame(height: 0.5)
+                }
+                .ignoresSafeArea(edges: .bottom)
+        )
+    }
+}
+
+// MARK: - 分类总览（底部「分类」tab）
+
+struct CategoryOverviewView: View {
+    let result: AnalysisResult
+    let onOpen: (ContentCategory) -> Void
+
+    private let columns = [GridItem(.adaptive(minimum: 150), spacing: 12)]
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("按内容分类")
+                        .font(.system(size: 20, weight: .semibold))
+                    Text("点一张卡片，回到「清理」并只看这一类")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .padding(.top, 6)
+
+                LazyVGrid(columns: columns, spacing: 12) {
+                    ForEach(ContentCategory.allCases) { category in
+                        let items = result.categoryBuckets[category] ?? []
+                        Button {
+                            onOpen(category)
+                        } label: {
+                            categoryCard(category, count: items.count, bytes: items.reduce(Int64(0)) { $0 + max(0, $1.fileSize) })
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(16)
+        }
+        .background(Color(red: 0.96, green: 0.96, blue: 0.97))
+    }
+
+    private func categoryCard(_ category: ContentCategory, count: Int, bytes: Int64) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Image(systemName: category.icon)
+                    .font(.system(size: 16, weight: .medium))
+                    .foregroundColor(color(for: category))
+                Spacer()
+                Text("\(count)")
+                    .font(.system(size: 22, weight: .semibold))
+                    .foregroundColor(count == 0 ? Color.secondary.opacity(0.5) : .primary)
+            }
+            Text(category.rawValue)
+                .font(.system(size: 14, weight: .medium))
+            Text(count == 0 ? "暂无" : byteText(bytes))
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(14)
+        .background(Color.white)
+        .cornerRadius(14)
+    }
+
+    private func color(for category: ContentCategory) -> Color {
+        switch category {
+        case .receipt: return Color(red: 0.2, green: 0.55, blue: 0.4)
+        case .document: return Color(red: 0.35, green: 0.45, blue: 0.55)
+        case .screenshot: return Color(red: 0.4, green: 0.45, blue: 0.5)
+        case .person: return Color(red: 0.85, green: 0.45, blue: 0.4)
+        case .food: return Color(red: 0.9, green: 0.55, blue: 0.2)
+        case .scenery: return Color(red: 0.25, green: 0.6, blue: 0.5)
+        case .pet: return Color(red: 0.55, green: 0.42, blue: 0.3)
+        case .privacy: return Color(red: 0.6, green: 0.35, blue: 0.6)
+        case .other: return Color(red: 0.5, green: 0.5, blue: 0.55)
+        }
+    }
+}
+
+// MARK: - 我的
+
+struct SettingsTabView: View {
+    let onRestart: () -> Void
+    let photoCount: Int
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                Text("我的")
+                    .font(.system(size: 20, weight: .semibold))
+                    .padding(.top, 6)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(appVersionLine())
+                        .font(.system(size: 15, weight: .medium))
+                    Text("这次分析了 \(photoCount) 项（照片 + 视频）")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+                .background(Color.white)
+                .cornerRadius(14)
+
+                Button {
+                    onRestart()
+                } label: {
+                    Text("重新扫描")
+                        .font(.system(size: 15, weight: .medium))
+                        .foregroundColor(Color(red: 0.0, green: 0.48, blue: 1.0))
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 14)
+                        .background(Color.white)
+                        .cornerRadius(14)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("settings-rescan")
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("关于这个 App")
+                        .font(.system(size: 14, weight: .medium))
+                    Text("所有识别都在手机本地完成：没有服务器、没有上传、没有账号。删掉的照片进系统「最近删除」，30 天内可以恢复。")
+                        .font(.system(size: 12))
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(16)
+                .background(Color.white)
+                .cornerRadius(14)
+
+                Text("判定口径：重复=原图哈希相同；相似=缩略图感知哈希接近；模糊=清晰度低于全库中位数；隐私=排除人脸后的裸露密度。误判永远会有，最终点删除的永远是你自己。")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.horizontal, 4)
+            }
+            .padding(16)
+        }
+        .background(Color(red: 0.96, green: 0.96, blue: 0.97))
+    }
+}
+
+func appVersionLine() -> String {
+    let info = Bundle.main.infoDictionary
+    let short = info?["CFBundleShortVersionString"] as? String ?? "?"
+    let build = info?["CFBundleVersion"] as? String ?? "?"
+    return "版本 \(short)（构建号 \(build)）"
+}
+
+// MARK: - 空间统计（一份口径，两个读者）
+
+struct SpaceStats {
+    let totalBytes: Int64
+    let photoBytes: Int64
+    let videoBytes: Int64
+    let suggestedBytes: Int64
+    let duplicateWasteBytes: Int64
+    let freedBytes: Int64
+    let deletedCount: Int
+    let categoryRows: [CatRow]
+
+    init(result: AnalysisResult, deletedIDs: Set<String>) {
+        var sizeByID: [String: Int64] = [:]
+        sizeByID.reserveCapacity(result.items.count)
+        for item in result.items {
+            sizeByID[item.id] = max(0, item.fileSize)
+        }
+
+        var total: Int64 = 0
+        var photo: Int64 = 0
+        var video: Int64 = 0
+        for item in result.items {
+            let size = max(0, item.fileSize)
+            total += size
+            if item.isVideo { video += size } else { photo += size }
+        }
+
+        var suggested: Int64 = 0
+        for item in result.suggestedItems {
+            suggested += max(0, item.fileSize)
+        }
+
+        var waste: Int64 = 0
+        for group in result.duplicateGroups {
+            let sum = group.items.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
+            let keep = group.items.first.map { max(0, $0.fileSize) } ?? 0
+            waste += max(0, sum - keep)
+        }
+
+        var freed: Int64 = 0
+        for id in deletedIDs {
+            freed += sizeByID[id] ?? 0
+        }
+
+        var bytes: [ContentCategory: Int64] = [:]
+        var counts: [ContentCategory: Int] = [:]
+        for item in result.items where !item.isVideo && !deletedIDs.contains(item.id) {
+            bytes[item.category, default: 0] += max(0, item.fileSize)
+            counts[item.category, default: 0] += 1
+        }
+        var rows = bytes.map { key, value in
+            CatRow(id: key.rawValue, title: key.rawValue, bytes: value, count: counts[key] ?? 0)
+        }
+        rows.sort { $0.bytes > $1.bytes }
+        var finalRows = Array(rows.prefix(6))
+        if video > 0 {
+            finalRows.insert(CatRow(id: "video", title: "视频", bytes: video, count: result.videoCount), at: 0)
+        }
+
+        self.totalBytes = total
+        self.photoBytes = photo
+        self.videoBytes = video
+        self.suggestedBytes = suggested
+        self.duplicateWasteBytes = waste
+        self.freedBytes = freed
+        self.deletedCount = deletedIDs.count
+        self.categoryRows = finalRows
     }
 }
