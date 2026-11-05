@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var processed: Int = 0
     @State private var total: Int = 0
     @State private var errorMessage: String?
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         NavigationStack {
@@ -52,6 +53,21 @@ struct ContentView: View {
             Button("知道了", role: .cancel) { errorMessage = nil }
         } message: {
             Text(errorMessage ?? "")
+        }
+        // 扫描期间禁止自动锁屏。
+        // 锁屏 = 应用被挂起，正在解码的图和排队的 Vision 请求会被系统掐断；
+        // 用户解锁回来往往只能从头再扫一遍。这里跟着 phase 开关，进出后台也会重新算。
+        .onChange(of: phase) { newPhase in
+            ScreenAwake.shared.setScanning(newPhase == .scanning)
+        }
+        .onChange(of: scenePhase) { newPhase in
+            ScreenAwake.shared.setAppActive(newPhase == .active)
+        }
+        .onAppear {
+            ScreenAwake.shared.setAppActive(scenePhase == .active)
+        }
+        .onDisappear {
+            ScreenAwake.shared.setScanning(false)
         }
     }
 
@@ -1976,6 +1992,74 @@ struct PhotoThumbView: View {
             DispatchQueue.main.async {
                 self.image = img
             }
+        }
+    }
+}
+
+// MARK: - 扫描期间保持屏幕常亮
+
+/// 用 `ProcessInfo.beginActivity` 占住「屏幕别自动锁」这件事。
+///
+/// 为什么不是只写一句 `UIApplication.shared.isIdleTimerDisabled = true`：
+/// 那是个全局开关，谁都能把它改回去，而且只要有一条退出路径漏了「关掉」这一步，
+/// 扫描结束很久之后屏幕还在常亮、白耗电。beginActivity 返回一个凭证，由我们自己持有、
+/// 成对释放，作用域清楚，也不怕被别处覆盖。
+///
+/// 生效条件是「正在扫描」且「App 在前台」两件事同时成立：切到后台就主动松开
+/// （后台本来也不该占这个资源），回到前台如果还在扫则重新占上。
+final class ScreenAwake {
+
+    static let shared = ScreenAwake()
+
+    private var token: NSObjectProtocol?
+    private var wanted = false
+    private var appActive = true
+
+    private init() {}
+
+    func setScanning(_ on: Bool) {
+        runOnMain {
+            self.wanted = on
+            self.apply()
+        }
+    }
+
+    func setAppActive(_ on: Bool) {
+        runOnMain {
+            self.appActive = on
+            self.apply()
+        }
+    }
+
+    private func apply() {
+        let shouldHold = wanted && appActive
+
+        if shouldHold, token == nil {
+            token = ProcessInfo.processInfo.beginActivity(
+                options: [.idleDisplaySleepDisabled, .userInitiated],
+                reason: "正在扫描相册，请不要让屏幕自动锁定"
+            )
+            UIApplication.shared.isIdleTimerDisabled = true
+            NSLog("[PhotoOrganizer][Scan] 屏幕常亮：开")
+        } else if !shouldHold, token != nil {
+            releaseToken()
+            NSLog("[PhotoOrganizer][Scan] 屏幕常亮：关")
+        }
+    }
+
+    private func releaseToken() {
+        if let token = token {
+            ProcessInfo.processInfo.endActivity(token)
+        }
+        token = nil
+        UIApplication.shared.isIdleTimerDisabled = false
+    }
+
+    private func runOnMain(_ body: @escaping () -> Void) {
+        if Thread.isMainThread {
+            body()
+        } else {
+            DispatchQueue.main.async(execute: body)
         }
     }
 }

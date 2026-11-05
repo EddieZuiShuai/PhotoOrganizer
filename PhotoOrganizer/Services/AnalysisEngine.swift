@@ -1,6 +1,7 @@
 import Foundation
 import Photos
 import UIKit
+import os
 
 /// 核心分析引擎：读图 → 算哈希 → 算清晰度 → 聚类分组。
 ///
@@ -51,84 +52,126 @@ final class AnalysisEngine {
             let detailTextBudget = 300
             var detailTextUsed = 0
 
+            // 计时：这一版必须能拿出「时间到底花在哪」，否则优化全靠猜。
+            // 结果写进系统日志，用项目里的「手机连电脑诊断.cmd」就能捞出来。
+            var tFeature = 0.0   // 缩略图 + dHash + 清晰度 + 亮度/边缘
+            var tContent = 0.0   // 场景分类 + 小图 OCR
+            var tDetail = 0.0    // 1024px 大图补读
+            var detailCount = 0
+            var memSkips = 0
+            var memoryTight = false
+            let scanStart = CFAbsoluteTimeGetCurrent()
+
             // 1) 逐张提取特征 + 内容识别（一次缩略图，算四样东西）
             for (index, asset) in assets.enumerated() {
                 let isVideo = (asset.mediaType == .video)
 
-                var item = PhotoItem(
-                    id: asset.localIdentifier,
-                    asset: asset,
-                    creationDate: asset.creationDate,
-                    pixelWidth: asset.pixelWidth,
-                    pixelHeight: asset.pixelHeight,
-                    isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
-                    isVideo: isVideo
-                )
-                item.isFavorite = asset.isFavorite
-                item.fileSize = library.fileSize(of: asset)
-
-                if !isVideo {
-                    // 320 比原来的 256 多留一点细节，模糊判断才不至于「全都看着挺锐」
-                    if let thumb = library.thumbnail(for: asset, maxPixel: 320) {
-                        item.dHash = self.dHash(from: thumb)
-
-                        // 清晰度：先做对比度拉伸再算拉普拉斯方差，
-                        // 否则「阴天/室内/夜景」这类低对比照片会被误判成糊片
-                        if let detail = self.sharpnessDetail(from: thumb) {
-                            item.sharpness = detail.lapVar
-                            item.contrastRange = detail.contrast
-                            item.isLowDetail = detail.lowDetail
-                        }
-
-                        let st = ContentAnalyzer.shared.stats(from: thumb)
-                        item.brightness = st.brightness
-                        item.edgeDensity = st.edgeDensity
-
-                        let allowOCR = ocrUsed < ocrBudget
-                        let content = ContentAnalyzer.shared.analyze(
-                            image: thumb,
-                            isScreenshot: item.isScreenshot,
-                            allowOCR: allowOCR
-                        )
-                        if content.ranOCR { ocrUsed += 1 }
-                        item.category = content.category
-                        item.contentTags = content.tags
-                        item.ocrHits = content.ocrHits
-                        item.faceCount = content.faceCount
-
-                        // 320px 的图上，发票的字只有 3~6 像素高，读不出来。
-                        // 所以「看起来像纸/票」，或者「明明读到了字但没命中关键词」的照片，
-                        // 重取一张约 1024px 的图再读一次——这是「发票恒为 0」的正解。
-                        //
-                        // 两份预算分开算：只靠标签命中的那批才是高置信度，
-                        // 靠「读到字」兜底的那批容易一大片（路牌、菜单、包装说明都会被算进来）。
-                        // 混用一个池子的话，相册开头那几十张就能把额度吃干净，后面的发票轮不到。
-                        let wantsByLabel = content.documentLike
-                        let wantsByText = !wantsByLabel && content.textLength >= 12
-                        let hasBudget = (wantsByLabel && detailDocUsed < detailDocBudget)
-                            || (wantsByText && detailTextUsed < detailTextBudget)
-
-                        if hasBudget && !item.isScreenshot {
-                            if let big = library.imageForOCR(for: asset, maxPixel: 1024) {
-                                if wantsByLabel { detailDocUsed += 1 } else { detailTextUsed += 1 }
-                                let detail = ContentAnalyzer.shared.ocrOnly(image: big)
-                                if !detail.receiptHits.isEmpty {
-                                    item.category = .receipt
-                                    item.ocrHits = Array(detail.receiptHits.prefix(4))
-                                } else if detail.docKeywordHit && item.category == .other {
-                                    item.category = .document
-                                }
-                            }
-                        }
-                    }
+                // 每 200 张看一次还剩多少内存。低于 220 MB 就不再取 1024px 大图：
+                // 大图 + Vision 是整轮里最吃内存的一步，先牺牲它，保住扫描能跑完。
+                if index % 200 == 0 {
+                    memoryTight = MemoryProbe.availableMB() < 220
                 }
 
-                items.append(item)
+                // 整个循环体套一个自动释放池 —— 这是扫描能不能跑完的关键。
+                // PHImageManager 解码出的图、CGContext、Vision 的中间结果都是自动释放对象，
+                // 而整段分析跑在一个 DispatchQueue 闭包里：闭包不返回，池子就一直不排空。
+                // 2 万张累积下来是几个 GB，系统会中途直接 jetsam 掉进程，
+                // 表现就是「扫到某个百分比突然闪退，相册里还找不到崩溃日志」。
+                autoreleasepool {
+                    var item = PhotoItem(
+                        id: asset.localIdentifier,
+                        asset: asset,
+                        creationDate: asset.creationDate,
+                        pixelWidth: asset.pixelWidth,
+                        pixelHeight: asset.pixelHeight,
+                        isScreenshot: asset.mediaSubtypes.contains(.photoScreenshot),
+                        isVideo: isVideo
+                    )
+                    item.isFavorite = asset.isFavorite
+                    item.fileSize = library.fileSize(of: asset)
+
+                    if !isVideo {
+                        let t0 = CFAbsoluteTimeGetCurrent()
+                        // 320 比原来的 256 多留一点细节，模糊判断才不至于「全都看着挺锐」
+                        if let thumb = library.thumbnail(for: asset, maxPixel: 320) {
+                            item.dHash = self.dHash(from: thumb)
+
+                            // 清晰度：先做对比度拉伸再算拉普拉斯方差，
+                            // 否则「阴天/室内/夜景」这类低对比照片会被误判成糊片
+                            if let detail = self.sharpnessDetail(from: thumb) {
+                                item.sharpness = detail.lapVar
+                                item.contrastRange = detail.contrast
+                                item.isLowDetail = detail.lowDetail
+                            }
+
+                            let st = ContentAnalyzer.shared.stats(from: thumb)
+                            item.brightness = st.brightness
+                            item.edgeDensity = st.edgeDensity
+                            tFeature += CFAbsoluteTimeGetCurrent() - t0
+
+                            let t1 = CFAbsoluteTimeGetCurrent()
+                            let allowOCR = ocrUsed < ocrBudget
+                            let content = ContentAnalyzer.shared.analyze(
+                                image: thumb,
+                                isScreenshot: item.isScreenshot,
+                                allowOCR: allowOCR
+                            )
+                            if content.ranOCR { ocrUsed += 1 }
+                            item.category = content.category
+                            item.contentTags = content.tags
+                            item.ocrHits = content.ocrHits
+                            item.faceCount = content.faceCount
+                            tContent += CFAbsoluteTimeGetCurrent() - t1
+
+                            // 320px 的图上，发票的字只有 3~6 像素高，读不出来。
+                            // 所以「看起来像纸/票」，或者「明明读到了字但没命中关键词」的照片，
+                            // 重取一张约 1024px 的图再读一次——这是「发票恒为 0」的正解。
+                            //
+                            // 两份预算分开算：只靠标签命中的那批才是高置信度，
+                            // 靠「读到字」兜底的那批容易一大片（路牌、菜单、包装说明都会被算进来）。
+                            // 混用一个池子的话，相册开头那几十张就能把额度吃干净，后面的发票轮不到。
+                            let wantsByLabel = content.documentLike
+                            let wantsByText = !wantsByLabel && content.textLength >= 12
+                            let hasBudget = (wantsByLabel && detailDocUsed < detailDocBudget)
+                                || (wantsByText && detailTextUsed < detailTextBudget)
+
+                            if hasBudget && !item.isScreenshot {
+                                if memoryTight {
+                                    memSkips += 1
+                                } else {
+                                    let t2 = CFAbsoluteTimeGetCurrent()
+                                    if let big = library.imageForOCR(for: asset, maxPixel: 1024) {
+                                        if wantsByLabel { detailDocUsed += 1 } else { detailTextUsed += 1 }
+                                        let detail = ContentAnalyzer.shared.ocrOnly(image: big)
+                                        if !detail.receiptHits.isEmpty {
+                                            item.category = .receipt
+                                            item.ocrHits = Array(detail.receiptHits.prefix(4))
+                                        } else if detail.docKeywordHit && item.category == .other {
+                                            item.category = .document
+                                        }
+                                        detailCount += 1
+                                    }
+                                    tDetail += CFAbsoluteTimeGetCurrent() - t2
+                                }
+                            }
+                        } else {
+                            tFeature += CFAbsoluteTimeGetCurrent() - t0
+                        }
+                    }
+
+                    items.append(item)
+                }
 
                 if index % 10 == 0 || index == total - 1 {
                     progress(index + 1, total, "正在识别照片内容")
                 }
             }
+
+            // 第一阶段的耗时构成：一眼就能看出时间是被分类吃掉、还是被大图补读吃掉。
+            let phase1 = CFAbsoluteTimeGetCurrent() - scanStart
+            NSLog("[PhotoOrganizer][Scan] 第一阶段 共 %d 张 / %.1fs｜特征 %.1fs｜分类+小图OCR %.1fs（用了 %d 次）｜大图补读 %.1fs（%d 张，因内存跳过 %d 张）｜无缩略图 %d 张",
+                  total, phase1, tFeature, tContent, ocrUsed, tDetail, detailCount, memSkips,
+                  items.filter { $0.dHash == nil && !$0.isVideo }.count)
 
             // 1.5) 清晰度参考值：本相册自己的中位数。
             //      「是否模糊」永远是个相对判断——用同一个人的手机、同一批照片当基准最靠谱。
@@ -611,5 +654,25 @@ private struct UnionFind {
             parent[rb] = ra
             rank[ra] += 1
         }
+    }
+}
+
+// MARK: - 内存探针
+
+/// 问系统「我这个进程还能再吃多少内存」。
+///
+/// `os_proc_available_memory()` 是 iOS 13 起提供的轻量接口（比 task_info 便宜得多），
+/// 返回的是「距离本进程内存上限还剩多少字节」。拿不到就返回一个大数：
+/// 宁可多跑一次大图补读，也不要因为读不到数值就把功能整段关掉。
+enum MemoryProbe {
+
+    static func availableMB() -> Int {
+        if #available(iOS 13.0, *) {
+            let bytes = os_proc_available_memory()
+            if bytes > 0 {
+                return Int(bytes / 1024 / 1024)
+            }
+        }
+        return 9999
     }
 }
