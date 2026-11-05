@@ -95,18 +95,43 @@ final class PhotoLibraryService {
         let duration = asset.duration
         guard duration > 1.0 else { return [] }
 
-        let generator = AVAssetImageGenerator(asset: asset)
+        // PHAsset 不是 AVAsset，必须先向 PHImageManager 要一份。
+        // 这里是同步等待（带 5 秒上限）：内容识别整段跑在 .utility 队列上，
+        // 阻塞它不会卡界面；拿不到就返回空，宁可漏判也不能把整轮扫描拖死。
+        // ⚠️ 不要在主线程调这个方法。
+        let options = PHVideoRequestOptions()
+        options.isNetworkAccessAllowed = false
+        options.deliveryMode = .fastFormat
+
+        let sem = DispatchSemaphore(value: 0)
+        var assetBox: AVAsset?
+        PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { av, _, _ in
+            assetBox = av
+            sem.signal()
+        }
+        guard sem.wait(timeout: .now() + 5) == .success, let avAsset = assetBox else { return [] }
+
+        let generator = AVAssetImageGenerator(asset: avAsset)
+        // 竖拍视频的原始像素是横的，不转正的话肤色统计和 Vision 人脸框会差 90°
         generator.appliesPreferredTrackTransform = true
         generator.maximumSize = CGSize(width: maxPixel, height: maxPixel)
         generator.requestedTimeToleranceBefore = CMTime(seconds: 0.4, preferredTimescale: 600)
         generator.requestedTimeToleranceAfter = CMTime(seconds: 0.4, preferredTimescale: 600)
 
         var frames: [UIImage] = []
+        // 30% / 65%：避开片头黑场和片尾，两个点足够覆盖「整段是同一场景」的常见情况
         for ratio in [0.30, 0.65] {
             let time = CMTime(seconds: duration * ratio, preferredTimescale: 600)
-            if let cg = try? generator.copyCGImage(at: time, actualTime: nil) {
-                frames.append(UIImage(cgImage: cg))
+            let frameSem = DispatchSemaphore(value: 0)
+            var frame: UIImage?
+            generator.generateCGImagesAsynchronously(forTimes: [NSValue(time: time)]) { _, cg, _, result, _ in
+                if result == .succeeded, let cg = cg {
+                    frame = UIImage(cgImage: cg)
+                }
+                frameSem.signal()
             }
+            _ = frameSem.wait(timeout: .now() + 5)
+            if let frame = frame { frames.append(frame) }
         }
         return frames
     }
