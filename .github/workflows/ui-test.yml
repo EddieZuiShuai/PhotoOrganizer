@@ -64,12 +64,22 @@ jobs:
 
       - name: 安装并灌入测试照片
         run: |
+          UDID="${{ steps.sim.outputs.udid }}"
           APP=$(find build/Build/Products/Debug-iphonesimulator -maxdepth 1 -name '*.app' | head -1)
           echo "APP=$APP"
-          xcrun simctl install "${{ steps.sim.outputs.udid }}" "$APP"
-          xcrun simctl privacy "${{ steps.sim.outputs.udid }}" grant photos com.eddie.photoorganizer || true
-          xcrun simctl addmedia "${{ steps.sim.outputs.udid }}" UITestFixtures/*.jpg
+          xcrun simctl install "$UDID" "$APP"
+
+          # 先把照片灌进去，再授权。
+          # 顺序反了会出问题：上一轮挂在这里就是这个原因 —— grant 返回 0 但 TCC 没落库，
+          # 首页照片计数是 0/0，点「开始扫描」立刻弹系统授权框。
+          xcrun simctl addmedia "$UDID" UITestFixtures/*.jpg
           echo "已导入 $(ls UITestFixtures/*.jpg | wc -l) 张测试照片"
+
+          echo "== 预授权相册 =="
+          xcrun simctl privacy "$UDID" grant photos com.eddie.photoorganizer
+          echo "grant photos rc=$?"
+          xcrun simctl privacy "$UDID" grant photos-add com.eddie.photoorganizer
+          echo "grant photos-add rc=$?"
 
       - name: 安装 Maestro
         run: |
@@ -106,7 +116,27 @@ jobs:
 
           echo "== Maestro 看到的界面元素 =="
           maestro hierarchy > build/preflight/hierarchy.txt 2>&1 || true
-          head -100 build/preflight/hierarchy.txt
+          python3 - <<'PY' || true
+          import json
+          try:
+              d = json.load(open('build/preflight/hierarchy.txt', encoding='utf-8'))
+          except Exception as e:
+              print('层级解析失败：', e)
+              raise SystemExit(0)
+          out = []
+          def walk(n):
+              a = n.get('attributes', {})
+              t = (a.get('accessibilityText') or '').strip()
+              if t:
+                  out.append((t, a.get('bounds')))
+              for c in n.get('children', []):
+                  walk(c)
+          walk(d)
+          print('有名字的元素：%d 个' % len(out))
+          for t, b in out:
+              print('  %-42s %s' % (t[:40], b))
+          print('-> 首页按钮「开始扫描」在不在层级里：', any('开始扫描' in t for t, _ in out))
+          PY
 
       - name: 跑 UI 用例
         id: test

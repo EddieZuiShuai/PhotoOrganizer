@@ -7,14 +7,22 @@ name: 共用 - 启动并等扫描跑完
 - launchApp
 - takeScreenshot: 00_home
 
-# iPhone SE（375×667）上首页内容比屏幕高，「开始扫描」掉在首屏之下，
-# 直接断言会判成不可见。统一先滚到它露出来再点，大屏上这一步是空操作。
+# iPhone SE（375×667）上首页内容比屏幕高，「开始扫描」掉在首屏之下
+# （实测无障碍树里根本没有这个元素，y 已经排到 673 之外）。
+# 统一先滚到它露出来再点；大屏上这一步是空操作。
 - scrollUntilVisible:
     element:
       text: "开始扫描"
     direction: DOWN
     timeout: 20000
+    visibilityPercentage: 60
 - tapOn: "开始扫描"
+
+# 万一预授权没生效，首次会弹系统相册授权框（中英文各兜一次）。
+# 已经授权过就不会出现，这一步会直接跳过。
+- tapOn:
+    text: "允许完全访问|允许访问所有照片|Allow Full Access|Allow Access to All Photos"
+    optional: true
 
 # 12 张测试图在模拟器上要跑完清晰度 + 内容识别，给足 3 分钟
 - extendedWaitUntil:

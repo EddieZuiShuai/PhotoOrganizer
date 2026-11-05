@@ -21,16 +21,8 @@ name: 06 布局三档切换 + 分组页隐藏布局按钮
 
 # 布局选择会记住：重启 App 后仍是刚选的那一档
 - tapOn: "单列"
-- launchApp
-- scrollUntilVisible:
-    element:
-      text: "开始扫描"
-    direction: DOWN
-    timeout: 20000
-- tapOn: "开始扫描"
-- extendedWaitUntil:
-    visible: "逐张过"
-    timeout: 180000
+# 重新走一遍冷启动（子流程里已包含滚动 + 授权兜底 + 等扫描）
+- runFlow: ../subflows/scan.yaml
 - tapOn: "大文件.*"
 - assertVisible: "按体积从大到小.*"
 
