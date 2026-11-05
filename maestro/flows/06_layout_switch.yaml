@@ -1,0 +1,41 @@
+appId: com.eddie.photoorganizer
+name: 06 布局三档切换 + 分组页隐藏布局按钮
+---
+- runFlow: ../subflows/scan.yaml
+
+- tapOn: "大文件.*"
+
+# 三列 → 单列：列表模式会多出一行「按体积从大到小」
+- tapOn: "三列"
+- assertNotVisible: "按体积从大到小.*"
+- tapOn: "单列"
+- assertVisible: "按体积从大到小.*"
+- takeScreenshot: 09_layout_list
+
+# 单列 → 两列 → 三列，来回切不能崩、不能白屏
+- tapOn: "两列"
+- assertNotVisible: "按体积从大到小.*"
+- assertVisible: "大文件.*"
+- tapOn: "三列"
+- assertVisible: "大文件.*"
+
+# 布局选择会记住：重启 App 后仍是刚选的那一档
+- tapOn: "单列"
+- launchApp
+- assertVisible: "开始扫描"
+- tapOn: "开始扫描"
+- extendedWaitUntil:
+    visible: "逐张过"
+    timeout: 180000
+- tapOn: "大文件.*"
+- assertVisible: "按体积从大到小.*"
+
+# 收尾：切回三列，免得影响后面用例里的「照片 xx」定位
+- tapOn: "三列"
+
+# 分组页（重复 / 相似）不应该出现布局按钮
+- tapOn: "重复.*"
+- assertNotVisible: "单列"
+- assertNotVisible: "两列"
+- tapOn: "大文件.*"
+- assertVisible: "三列"

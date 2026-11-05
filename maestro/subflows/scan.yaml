@@ -1,8 +1,16 @@
-# 共用：启动 App 并等扫描跑完
-# 由主 flow 提供 appId
+appId: com.eddie.photoorganizer
+name: 共用 - 启动并等扫描跑完
+---
+# 共用子流程：冷启动 App，点「开始扫描」，等到结果页出现。
+# Maestro 2.x 要求每个被解析的 flow 文件都带配置头（哪怕只是被 runFlow 引用），
+# 少了会直接报 Config Section Required。
 - launchApp
+
 - assertVisible: "开始扫描"
+- takeScreenshot: 00_home
 - tapOn: "开始扫描"
+
+# 12 张测试图在模拟器上要跑完清晰度 + 内容识别，给足 3 分钟
 - extendedWaitUntil:
     visible: "逐张过"
     timeout: 180000

@@ -1,0 +1,44 @@
+appId: com.eddie.photoorganizer
+name: 04 预览：长按进大图 / 标记待删 / 返回后选中保留
+---
+- runFlow: ../subflows/scan.yaml
+
+- tapOn: "大文件.*"
+- tapOn: "三列"
+
+# 长按第一张进入全屏预览
+- longPressOn:
+    text: "照片 .*"
+    index: 0
+
+- extendedWaitUntil:
+    visible: "1 / 12"
+    timeout: 15000
+- takeScreenshot: 06_preview
+
+# 标记待删：底部提示 + 顶栏已选计数都要跟着变
+- tapOn:
+    id: "preview-mark"
+- assertVisible: "已标记待删"
+- assertVisible: "已选 1"
+
+# 再点一次取消标记
+- tapOn:
+    id: "preview-mark"
+- assertNotVisible: "已标记待删"
+- assertVisible: "标记待删"
+- tapOn:
+    id: "preview-mark"
+- assertVisible: "已标记待删"
+
+# 关闭预览，回到列表 —— 勾选状态必须带回来（不清空）
+- tapOn:
+    id: "preview-close"
+- extendedWaitUntil:
+    visible: "已选 1 张.*"
+    timeout: 10000
+- takeScreenshot: 07_preview_back
+
+# 清理干净，别把状态留给下一条用例
+- tapOn: "取消"
+- assertVisible: "点一下选中.*"
