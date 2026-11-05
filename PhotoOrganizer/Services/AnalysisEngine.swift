@@ -78,6 +78,7 @@ final class AnalysisEngine {
 
             NSLog("[PhotoOrganizer][Scan] 阶段二 内容识别 %.1fs｜全流程 %.1fs",
                   tContent, CFAbsoluteTimeGetCurrent() - tStart)
+            ScanCache.shared.logStats()
 
             DispatchQueue.main.async {
                 completion(final)
@@ -1024,10 +1025,27 @@ final class ScanCache {
     private let version = 1
 
     private let io = DispatchQueue(label: "com.eddie.photoorganizer.scancache", qos: .utility)
+    /// 扫描线程写、界面线程读，必须加锁。锁里只做字典操作，不碰 IO。
+    private let lock = NSLock()
+
     private var map: [String: CachedPhoto] = [:]
+    /// 还没落盘的条目。**这是修 CPU 占用的关键**：全命中扫描时它是空的，
+    /// `flush()` 直接返回，一次编码、一次写盘都不做。
+    private var dirty: [String: CachedPhoto] = [:]
     private var loaded = false
 
-    private var fileURL: URL? {
+    /// 单飞：同一时刻只允许一个写任务在跑，后来的请求合并成一次。
+    private var writing = false
+    private var flushAgain = false
+
+    /// 增量日志已有的批次数与字节数。读写都在 io 队列（载入时是扫描开始前，无并发）。
+    private var deltaBatches = 0
+    private var deltaBytes = 0
+    /// 增量日志超过这个体积就把全量并回 base、清空日志。
+    /// 12 MB ≈ 两万多条，正常一轮扫描走不到；走到了也只是一次全量写。
+    private let compactThreshold = 12 * 1024 * 1024
+
+    private var dirURL: URL? {
         let fm = FileManager.default
         guard let base = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
             return nil
@@ -1038,28 +1056,65 @@ final class ScanCache {
         if !fm.fileExists(atPath: dir.path) {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
         }
-        return dir.appendingPathComponent("scan-cache-v\(version).plist")
+        return dir
     }
+    private var baseURL: URL? { dirURL?.appendingPathComponent("scan-cache-v\(version).plist") }
+    private var deltaURL: URL? { dirURL?.appendingPathComponent("scan-cache-v\(version).delta") }
 
     // MARK: 读
 
     func loadIfNeeded() {
         guard !loaded else { return }
         loaded = true
-        guard let url = fileURL, let data = try? Data(contentsOf: url) else { return }
+
+        var m: [String: CachedPhoto] = [:]
         let decoder = PropertyListDecoder()
-        if let list = try? decoder.decode([CachedPhoto].self, from: data) {
-            var m: [String: CachedPhoto] = [:]
+
+        if let url = baseURL, let data = try? Data(contentsOf: url),
+           let list = try? decoder.decode([CachedPhoto].self, from: data) {
             m.reserveCapacity(list.count)
             for e in list { m[e.id] = e }
-            map = m
-            NSLog("[PhotoOrganizer][Scan] 增量缓存载入 %d 条", list.count)
         }
+
+        // 重放增量日志。base 之后新增/修改的条目全在这里。
+        // 格式是「4 字节长度 + 一批 [CachedPhoto]」；写到一半被杀留下的半截记录直接丢弃，
+        // 不影响前面已经完整的批次（最多重算最后 800 张）。
+        var batches = 0
+        var bytes = 0
+        if let url = deltaURL, let data = try? Data(contentsOf: url) {
+            let raw = [UInt8](data)
+            var off = 0
+            while off + 4 <= raw.count {
+                let len = (Int(raw[off]) << 24) | (Int(raw[off + 1]) << 16)
+                    | (Int(raw[off + 2]) << 8) | Int(raw[off + 3])
+                off += 4
+                guard len > 0, off + len <= raw.count else { break }
+                if let list = try? decoder.decode([CachedPhoto].self, from: Data(raw[off..<off + len])) {
+                    for e in list { m[e.id] = e }
+                    batches += 1
+                }
+                off += len
+            }
+            bytes = data.count
+        }
+
+        lock.lock()
+        map = m
+        deltaBatches = batches
+        deltaBytes = bytes
+        lock.unlock()
+
+        NSLog("[PhotoOrganizer][Scan] 增量缓存载入 %d 条（增量日志 %d 批 / %.1f MB）",
+              m.count, batches, Double(bytes) / 1048576.0)
     }
 
     /// 命中条件：同一条 asset，且修改时间没变。
     func hit(for asset: PHAsset) -> CachedPhoto? {
-        guard let e = map[asset.localIdentifier] else { return nil }
+        let id = asset.localIdentifier
+        lock.lock()
+        let cached = map[id]
+        lock.unlock()
+        guard let e = cached else { return nil }
         let now = asset.modificationDate?.timeIntervalSince1970 ?? 0
         // 容差 1 秒：Photos 给的 modificationDate 偶尔会有亚秒抖动
         guard abs(now - e.modified) <= 1 else { return nil }
@@ -1069,29 +1124,148 @@ final class ScanCache {
     // MARK: 写
 
     func store(_ item: PhotoItem, asset: PHAsset) {
-        map[item.id] = CachedPhoto(item: item, asset: asset)
+        let entry = CachedPhoto(item: item, asset: asset)
+        lock.lock()
+        map[item.id] = entry
+        dirty[item.id] = entry
+        lock.unlock()
     }
 
-    /// 按批落盘。传的是值拷贝（CoW），真正的编码在后台队列做，不挡主循环。
+    /// 把「还没落盘的」写出去，而不是每次把两万条整份重编码。
+    ///
+    /// 旧实现无条件 `Array(map.values)` 全量编码：两万张约 5.5 MB，每 800 张一次，
+    /// 一轮 28 次、写盘 154 MB，io 队列烧掉 90 秒 CPU（系统直接给了 `EXC_CPU_USAGE`）。
+    /// 现在全命中扫描时 `dirty` 是空的，这个方法立即返回；有新增时只编码新增的那一批。
     func flush() {
-        let snapshot = Array(map.values)
-        guard !snapshot.isEmpty else { return }
+        lock.lock()
+        if dirty.isEmpty {
+            lock.unlock()
+            return
+        }
+        if writing {
+            // 已经有一个写任务在跑。这一批并进下一次，避免排队堆积。
+            flushAgain = true
+            lock.unlock()
+            return
+        }
+        let batch = Array(dirty.values)
+        dirty.removeAll(keepingCapacity: true)
+        writing = true
+        lock.unlock()
+
         io.async { [weak self] in
-            guard let url = self?.fileURL else { return }
-            let encoder = PropertyListEncoder()
-            encoder.outputFormat = .binary
-            guard let data = try? encoder.encode(snapshot) else { return }
-            try? data.write(to: url, options: .atomic)
+            guard let self = self else { return }
+            let ok = self.appendBatch(batch)
+            if !ok {
+                // 写失败就把这批放回待落盘，下一轮再试。
+                // 不这么做的话 dirty 已经清空，这批条目只活在内存里，被杀就丢了。
+                self.lock.lock()
+                for e in batch { self.dirty[e.id] = e }
+                self.lock.unlock()
+            }
+
+            self.lock.lock()
+            self.writing = false
+            let again = self.flushAgain || !self.dirty.isEmpty
+            self.flushAgain = false
+            self.lock.unlock()
+
+            if again { self.flush() }
+        }
+    }
+
+    /// 追加一批到增量日志。一次编码 ≈ 800 条 ≈ 200 KB，和旧实现的全量 5.5 MB 差两个数量级。
+    @discardableResult
+    private func appendBatch(_ batch: [CachedPhoto]) -> Bool {
+        guard let url = deltaURL else { return false }
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        guard let payload = try? encoder.encode(batch) else { return false }
+
+        var frame = Data(capacity: payload.count + 4)
+        let len = UInt32(payload.count).bigEndian
+        withUnsafeBytes(of: len) { frame.append(contentsOf: $0) }
+        frame.append(payload)
+
+        let fm = FileManager.default
+        if !fm.fileExists(atPath: url.path) {
+            fm.createFile(atPath: url.path, contents: nil)
+        }
+        guard let handle = try? FileHandle(forWritingTo: url) else { return false }
+        defer { try? handle.close() }
+        do {
+            _ = try handle.seekToEnd()
+            try handle.write(contentsOf: frame)
+        } catch {
+            return false
+        }
+
+        lock.lock()
+        deltaBatches += 1
+        deltaBytes += frame.count
+        let shouldCompact = deltaBytes >= compactThreshold
+        lock.unlock()
+
+        if shouldCompact {
+            compact()
+        }
+        return true
+    }
+
+    /// 把增量日志并回 base：一次全量写，然后清空日志。
+    /// 只有在日志超过 12 MB 时才触发，所以正常扫描不会走到这里。
+    private func compact() {
+        guard let base = baseURL, let delta = deltaURL else { return }
+        lock.lock()
+        let snapshot = Array(map.values)
+        lock.unlock()
+
+        let encoder = PropertyListEncoder()
+        encoder.outputFormat = .binary
+        guard let data = try? encoder.encode(snapshot) else { return }
+        do {
+            try data.write(to: base, options: .atomic)
+            try? FileManager.default.removeItem(at: delta)
+            lock.lock()
+            deltaBatches = 0
+            deltaBytes = 0
+            lock.unlock()
+            NSLog("[PhotoOrganizer][Scan] 缓存压缩 %d 条 / %.1f MB",
+                  snapshot.count, Double(data.count) / 1048576.0)
+        } catch {
+            // 压缩失败就把日志留着，下次启动照样能重放，正确性不受影响。
         }
     }
 
     func clear() {
+        lock.lock()
         map.removeAll()
-        if let url = fileURL {
+        dirty.removeAll()
+        deltaBatches = 0
+        deltaBytes = 0
+        lock.unlock()
+
+        for url in [baseURL, deltaURL].compactMap({ $0 }) {
             try? FileManager.default.removeItem(at: url)
         }
     }
 
-    /// 给界面用：缓存里有多少张、占多大
-    var count: Int { map.count }
+    /// 给界面用：缓存里有多少张
+    var count: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return map.count
+    }
+
+    /// 给日志用：一眼看出这一轮到底写了多少。
+    func logStats() {
+        lock.lock()
+        let total = map.count
+        let pending = dirty.count
+        let batches = deltaBatches
+        let bytes = deltaBytes
+        lock.unlock()
+        NSLog("[PhotoOrganizer][Scan] 缓存 %d 条｜待落盘 %d 条｜增量日志 %d 批 / %.1f MB",
+              total, pending, batches, Double(bytes) / 1048576.0)
+    }
 }

@@ -62,6 +62,7 @@
 | 颜色 / 字号 / 交互行为 | `docs/DESIGN.md` |
 | 工作流 / 脚本 / 命令 / 版本号 | `docs/development.md` |
 | 用户看得见的行为 | `docs/user-guide.md` + `README.md` |
+| **用户可见的按钮/标签文案** | **同一次提交内改 `maestro/flows/`**；新按钮一律给 `accessibilityIdentifier`，用例按 id 点，不按文字点 |
 | 版本号 | `PhotoOrganizer/Info.plist`（两处）+ `docs/development.md` 的版本表 |
 
 ## 高频踩坑（细节在 `docs/development.md`）
@@ -71,7 +72,9 @@
 - 发票恒为 0 → 320px 缩略图上字只有 3~6 像素高，要 1024px 补读
 - 首次点开照片是空白 → sheet 必须用 item 驱动，不能用 `isPresented` + 并列状态
 - 结果页卡顿 → 高频进度不要放 `@State`，用 `RefineStatus` 单独订阅
+- **改按钮文案导致 UI 用例整批失败** → Maestro 的 `tapOn: "文字"` 是全字匹配；「取消」改成「取消选中 N 张」后 4 条 flow 全挂。新按钮给 `accessibilityIdentifier`，用例写 `tapOn: { id: ... }`
+- **增量扫描很"快"但后台烧 CPU** → `flush()` 无条件全量编码（5.5 MB × 28 次）；只编码 dirty、增量日志追加，全命中时一次都不写
 
 ## 当前版本
 
-`1.4 (17)`，两阶段扫描 + 发票二维码识别已上线。下一个 P0 是扫描太慢（21482 张约 13 分钟），方向见 `docs/TODO.md`。
+`1.4 (19)`，增量扫描 / 断点续扫 / 文档判定顺序 / 隐私分组已上线；19 修了缓存落盘的 CPU 写放大，并临时关掉隐私缩略图打码以便校准误报。

@@ -25,6 +25,7 @@ name: 05 全选 / 取消全选 / 清空
     text: "照片 .*"
     index: 1
 - assertVisible: "已选 2 张.*"
-- tapOn: "取消选中 2 张"
+- tapOn:
+    id: "chip-clear-selection"
 - assertVisible: "点一下选中.*"
 - assertVisible: "重新扫描"

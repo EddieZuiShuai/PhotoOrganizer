@@ -50,6 +50,9 @@ Models/
 
 - **增量优先**：`featurePass` 与 `contentPass` 每一步都先查 `ScanCache`。命中就整段跳过——不取缩略图、不跑 Vision。第二次扫描 1 分钟以内靠的就是这一条。
 - **缓存即断点**：`ScanCache.flush()` 每 800 张落盘一次。被杀之后重启，已算过的直接命中，最多重算最后 800 张。不设单独的「继续上次」入口，避免用户要在两个按钮之间做选择。
+- **只写脏数据**：`store()` 把条目同时放进 `map` 和 `dirty`；`flush()` 只编码 `dirty`，追加到 `scan-cache-v1.delta`（4 字节长度前缀 + 一批 `[CachedPhoto]`），全命中扫描时 `dirty` 为空、直接返回。base plist 只在日志超过 12 MB 时压一次。
+  > 这是 1.4(19) 修 CPU 的核心。旧实现每次 `flush()` 都 `Array(map.values)` 全量编码：两万张 ≈ 5.5 MB × 28 次 = 154 MB 写盘、io 队列 90 秒 94% CPU，系统直接出 `EXC_CPU_USAGE` 报告。
+- **崩溃安全**：增量日志按批追加，写到一半被杀只会留下半截记录，载入时丢弃该批；前面完整的批次仍然有效。
 - **缓存失效只认时间戳**：`modificationDate` 变了（裁剪、滤镜、调色）就重算；算法口径变了就改 `ScanCache.version`，整份作废。
 - **两段出货**是为了"一分钟能开始清理"，不是为了"更快"。内容识别那一段本来就要几分钟，把它挪到用户已经在翻结果页之后。
 - **`scanID` 守卫**：每次重扫 `scanID += 1`，所有异步回调回来先对号。否则"重开一局后上一局结果自己弹回来"。
@@ -82,6 +85,7 @@ Models/
 | 文档（关键词覆盖） | `docKeywords` 命中 **≥ 2 个** 且人脸面积 < 8% | `ContentAnalyzer.applyKeywords` |
 | 隐私粗筛 | 肤色占比 > 0.12 **且** 人体占比 > 0.10，两项相乘 × 3.2 ≥ 0.34 | `ContentAnalyzer.privacyScore` |
 | 隐私不参与打分 | `category == .privacy` 直接跳过 `buildScores`，也不进 `suggestedItems` | `AnalysisEngine.buildScores` |
+| 隐私缩略图打码 | **当前关闭**：`PrivacyDisplay.blurThumbnails = false`，为了逐张核对 533 张误报。改回 `true` 即恢复，三个调用点不用动 | `ContentView.PrivacyDisplay` |
 | 增量命中 | `localIdentifier` 相同 **且** `abs(modificationDate 差) ≤ 1s` | `ScanCache.hit` |
 
 `cleanupScore` 是这些加减分的累加，界面显示为百分比。它表示"综合可疑度"，不是"删除概率"。

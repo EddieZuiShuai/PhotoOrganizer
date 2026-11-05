@@ -942,6 +942,7 @@ struct ResultView: View {
                         Text("取消选中 \(selectedIDs.count) 张")
                             .font(.system(size: 11, weight: .medium))
                     }
+                    .accessibilityIdentifier("chip-clear-selection")
                 }
                 .foregroundColor(.red)
                 .padding(.horizontal, 10)
@@ -1465,7 +1466,7 @@ struct ResultView: View {
         let selected = selectedIDs.contains(item.id)
 
         return ZStack {
-            PhotoThumbView(asset: item.asset, blurred: item.category == .privacy)
+            PhotoThumbView(asset: item.asset, blurred: PrivacyDisplay.blurThumbnails && item.category == .privacy)
 
             VStack(spacing: 0) {
                 Spacer(minLength: 0)
@@ -1556,7 +1557,7 @@ struct ResultView: View {
     /// 方形缩略图 + 选中态（蓝底 + 白框 + 右下角勾）
     private func thumb(_ item: PhotoItem, size: CGFloat, selected: Bool) -> some View {
         ZStack(alignment: .bottomTrailing) {
-            PhotoThumbView(asset: item.asset, size: size, blurred: item.category == .privacy)
+            PhotoThumbView(asset: item.asset, size: size, blurred: PrivacyDisplay.blurThumbnails && item.category == .privacy)
 
             if selected {
                 Rectangle()
@@ -1716,6 +1717,8 @@ struct ResultView: View {
                             .background(Color.black.opacity(0.05))
                             .cornerRadius(10)
                     }
+                    // 文案会变（带数量），测试不能按文字点。给一个稳定标识，改文案不牵连用例。
+                    .accessibilityIdentifier("action-clear-selection")
 
                     Button {
                         performDelete()
@@ -1728,6 +1731,7 @@ struct ResultView: View {
                             .background(Color.red)
                             .cornerRadius(10)
                     }
+                    .accessibilityIdentifier("action-delete-selected")
                 }
                 .padding(16)
             }
@@ -2053,7 +2057,7 @@ struct SelectableThumb: View {
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            PhotoThumbView(asset: item.asset, size: size, blurred: item.category == .privacy)
+            PhotoThumbView(asset: item.asset, size: size, blurred: PrivacyDisplay.blurThumbnails && item.category == .privacy)
 
             if isSelected {
                 Rectangle()
@@ -2107,6 +2111,14 @@ struct SelectableThumb: View {
 }
 
 // MARK: - 缩略图
+
+/// 隐私分组的缩略图是否默认打码。
+///
+/// **当前关闭**：要逐张核对「隐私」组的误报（533 张），糊着看不清就没法判断。
+/// 校准完把这里改回 `true` 即可，三个调用点都不用动。
+enum PrivacyDisplay {
+    static let blurThumbnails = false
+}
 
 struct PhotoThumbView: View {
     let asset: PHAsset

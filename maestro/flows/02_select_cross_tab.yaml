@@ -35,5 +35,6 @@ name: 02 选中与跨分类保留
 - assertVisible: "已选 1 张.*"
 
 # 收尾：取消勾选，别把状态留给下一条
-- tapOn: "取消选中 [0-9]+ 张"
+- tapOn:
+    id: "action-clear-selection"
 - assertVisible: "点一下选中.*"
