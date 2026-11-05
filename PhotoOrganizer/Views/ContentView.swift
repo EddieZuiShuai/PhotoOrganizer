@@ -1297,6 +1297,7 @@ struct ResultView: View {
                             isSelected: selectedIDs.contains(item.id),
                             size: 96,
                             showsZoomBadge: true,
+                            blurred: blurPrivacyThumbnails && item.category == .privacy,
                             onOpen: { open(item, in: group.items) },
                             onToggle: { toggle(item.id) }
                         )
@@ -2042,6 +2043,9 @@ struct SelectableThumb: View {
     /// 分组卡片（重复 / 相似）里只有长按手势，界面上没有任何可见入口，
     /// 用户根本不知道能放大——长按是隐藏技能，不能当主入口用。
     var showsZoomBadge: Bool = false
+    /// 隐私组的缩略图要不要先糊掉。由调用方算好传进来——
+    /// 这个 struct 不读 UserDefaults，免得每个缩略图都去查一次。
+    var blurred: Bool = false
     let onOpen: () -> Void
     let onToggle: () -> Void
 
@@ -2049,7 +2053,7 @@ struct SelectableThumb: View {
 
     var body: some View {
         ZStack(alignment: .bottomTrailing) {
-            PhotoThumbView(asset: item.asset, size: size, blurred: blurPrivacyThumbnails && item.category == .privacy)
+            PhotoThumbView(asset: item.asset, size: size, blurred: blurred)
 
             if isSelected {
                 Rectangle()

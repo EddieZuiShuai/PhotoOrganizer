@@ -1139,26 +1139,6 @@ final class ScanCache {
         return total
     }
 
-    /// 清空缓存。**不删任何照片**，只是下次扫描要重新分析一遍。
-    ///
-    /// 注意 `loaded` 保持 true：清完之后如果马上重扫，`loadIfNeeded()` 不该再去读
-    /// 已经被删掉的文件——空字典正好让每一张都走"没命中"的分支。
-    func clear() {
-        let fm = FileManager.default
-        for url in [baseURL, deltaURL].compactMap({ $0 }) {
-            try? fm.removeItem(at: url)
-        }
-
-        lock.lock()
-        map.removeAll()
-        dirty.removeAll()
-        deltaBatches = 0
-        deltaBytes = 0
-        lock.unlock()
-
-        NSLog("[PhotoOrganizer][Scan] 扫描缓存已清空")
-    }
-
     // MARK: 写
 
     func store(_ item: PhotoItem, asset: PHAsset) {
