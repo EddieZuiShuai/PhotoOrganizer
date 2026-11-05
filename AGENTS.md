@@ -14,9 +14,9 @@
 | 技术栈 | SwiftUI + Photos + Vision，少量 UIKit；**无第三方依赖、无 SPM** |
 | 规模 | 11 个 Swift 文件约 8.1k 行；最大是 `Views/ContentView.swift`（约 3.1k 行） |
 | Bundle ID | `com.eddie.photoorganizer` |
-| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.5 / 21**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
+| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.5 / 22**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
 | 怎么编译 | **没有 Mac。** push 到 `main` → GitHub Actions `build.yml` → 下载 ipa → Windows 上用 Sideloadly 签名安装 |
-| 怎么测 | Maestro 云端 UI 用例 8 条（`maestro/flows/`），手动触发 `ui-test.yml`，本机用 `_ci_check.py` 取回结论 |
+| 怎么测 | Maestro 云端 UI 用例 9 条（`maestro/flows/`），手动触发 `ui-test.yml`，本机用 `_ci_check.py` 取回结论 |
 
 ## 铁律（违反即回退，不接受"顺手优化"）
 
@@ -81,11 +81,18 @@
 - **隐私判定先排除人脸再算密度** → 旧公式「肤色 × 人体」在自拍上必然过线；且肤色统计要先用 `uprightCGImage` 把 EXIF 方向烤进像素，否则竖拍照片的「排除人脸」会排到画面边上
 - **隐私有照片和视频两个类** → `ContentCategory` 现在是 `.privacy` + `.privacyVideo`。所有特判必须走 `category.isPrivacy`，写 `== .privacy` 会漏掉视频那一半（1.5 收口了 5 处）
 - **`PHAsset` 不是 `AVAsset`** → `AVAssetImageGenerator(asset:)` 不收 `PHAsset`，要先 `PHImageManager.requestAVAsset` 拿（异步）。抽帧方法内部用信号量同步等，**绝不能在主线程调**
+- **扫二维码别扫两遍** → `ContentAnalyzer.scanQR` 一次扫码同时返回「发票信息」+「任意 payload」（`QRScan`），旧的 `invoiceQR` 已删。要加新的二维码用途就在 `QRScan` 里扩字段，别再写第二个 `VNDetectBarcodes`
+- **逐张过批量删除的下标回退** → 待删只能来自已经滑过去的张，所以 `deleteMany` 直接 `index -= removed`，不用逐张算下标；同时清空 `history`（撤销链已乱）
 - **改隐私公式要作废旧结论** → 缓存里 `contentDone = true` 的条目会整段跳过内容识别。只改算法不作废缓存 = 用户永远看不到修复。作废走 `privacyModelVersion` + `ScanCache.resetPrivacyJudgements()`，**不要动 `ScanCache.version`**（那会作废整库，用户要重扫十几分钟）
 - **`git push` 报 schannel / TLS 错** → 环境里有 `http_proxy=127.0.0.1:5804`，git 走它必然握手失败。可靠写法是**行内清空四个变量**：`http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= git push`（`env -u` 在本机 Bash 里会静默失败，别用）
 
 ## 当前版本
 
-`1.5 (21)`：**隐私视频**（封面 + 条件补两帧，同一套密度口径）、隐私拆成「隐私照片 / 隐私视频」两张卡并共用开关、隐私判定 **v3**（加躯干闸门，只露头/证件照不再进组）、分类 tab 改成**就地 NavigationStack 下钻**（不再跳回清理页）、逐张过从右上角挪到列表上方整行入口（**评估后仍不做第五个 tab**）、新手教程 5 页；顺带删了死代码 `blurThreshold`、网格布局补「算清晰」。追加两条：隐私两个开关默认值改成「不显示（`showPrivacyCategory = false`）+ 模糊显示（`blurPrivacyThumbnails = true`）」；修了逐张过里「点喇叭会顺带暂停播放」——喇叭按钮原本是播放/暂停 `simultaneousGesture` 的子视图，点它等于「取消静音 + 暂停」一起发，已摘出成独立覆盖层。
+`1.5 (22)`：在 21 基础上再迭代一轮——
+1. **逐张过按钮重排** `撤销 / 待删 / 保留 / 删除`：「标记」改名「待删」（`flag` 图标），删除从「立即删当前张」改成**批量删所有已标记**（动态「删除 N 张」、没标置灰、二次确认）。
+2. **通用二维码分类** `ContentCategory.qrCode`「二维码」：`scanQR` 一次扫码同时给出发票信息 + 任意 payload，非发票二维码只在截图/文档/其他弱分类上生效（优先级 发票 > 二维码 > 截图 > 文档）。
+3. **首页首启提示卡**：`tutorialSeenVersion` 驱动，放「开始扫描」下方，看完自动消失（补上了 21 一直缺的「新用户看不到教程入口」）。
+4. **我的 → 帮助与支持**：补「邮件反馈」（`eddie.wu@qq.com`）+「常见问题」5 条。
+5. **清理页瘦身**：删顶部「空间」按钮（和底部 tab 重复）、发票数字换成「相似组」、「正在识别发票与分类」→「正在识别分类」、导出清单按钮及 `exportText` 移除、筛选按钮放大。
 
-**`1.5-2` 首页首启提示卡还没做**（`docs/TODO.md` P1-10）：底部 tab 要扫描完才出现，所以教程目前只有「我的」一个入口，新用户得自己去找。要补就在首页「开始扫描」**下方**加一张卡，别放上方（会推动按钮位置，8 条 Maestro flow 首屏全要改）。
+`1.5 (21)`：隐私视频、隐私拆两张卡、隐私 v3、分类就地 NavigationStack 下钻、逐张过挪到列表上方、新手教程 5 页；隐私开关默认「不显示 + 模糊显示」；修点喇叭顺带暂停的 bug。

@@ -46,13 +46,13 @@
 | `categoryBuckets` | `[ContentCategory: [PhotoItem]]` |
 | `blurReference` | 全库清晰度中位数，界面"灵敏度"按它的比例分档 |
 
-计算属性：`photoCount`（排除视频）、`receiptCount`、`reclaimableCount`。
+计算属性：`photoCount`（排除视频）、`reclaimableCount`。
 
 ### 枚举
 
 | 类型 | 取值 | 用途 |
 |---|---|---|
-| `ContentCategory` | 发票票据 / 文档 / 截图 / 人物 / 美食 / 风景 / 宠物 / **隐私照片 / 隐私视频** / 其他 | 带 `icon`（SF Symbols）与 `isPrivacy`（两个隐私类都算，**别再写 `== .privacy`**）。`fromCache(_:)` 认 1.4 的旧名「隐私」 |
+| `ContentCategory` | 发票票据 / **二维码** / 文档 / 截图 / 人物 / 美食 / 风景 / 宠物 / **隐私照片 / 隐私视频** / 其他 | 带 `icon`（SF Symbols）、`isPrivacy`（两个隐私类都算，**别再写 `== .privacy`**）、`isQRWeakCategory`（截图/文档/其他才算，二维码不抢人物/美食/风景/宠物）。`fromCache(_:)` 认 1.4 的旧名「隐私」 |
 | `ResultTab` | suggested / duplicate / similar / blurry / large / content(ContentCategory) | 结果页标签，带 `title` / `icon` |
 | `LayoutMode` | list(1) / two(2) / three(3) | 列数，`rawValue` 直接当列数 |
 | `AppPhase` | idle / scanning / done | 主容器状态 |
@@ -119,7 +119,7 @@ func stats(from image: UIImage) -> Stats                     // brightness, edge
 func classify(image: UIImage, isScreenshot: Bool) -> Content // 分类 + 标签 + 人脸，不读字
 func analyze(image: UIImage, isScreenshot: Bool, allowOCR: Bool = true) -> Content
 func ocrOnly(image: UIImage) -> (receiptHits: [String], docKeywordHit: Bool, textLength: Int)
-func invoiceQR(in image: UIImage) -> InvoiceInfo?
+func scanQR(in image: UIImage) -> QRScan                 // 一次扫码：invoice(InvoiceInfo?) + payload(String?)
 static func parseInvoicePayload(_ raw: String) -> InvoiceInfo?
 func skinRatioOfImage(_ image: UIImage) -> Double          // 96×96 采样，亚毫秒，做隐私闸门
 func privacyScore(image: UIImage, skin: Double? = nil) -> Double   // v3：含躯干闸门

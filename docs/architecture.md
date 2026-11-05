@@ -14,7 +14,7 @@ Services/         有状态、有队列，全部单例
   PhotoLibraryService  相册读取、缩略图、原图数据、SHA-256、删除
   AnalysisEngine       特征、分组、打分、两阶段调度
   ScanCache            增量结果缓存（按照片 ID + 修改时间），兼作断点
-  ContentAnalyzer      Vision 分类 / OCR / 发票二维码 / 隐私粗筛
+  ContentAnalyzer      Vision 分类 / OCR / 二维码 / 隐私粗筛
   VideoCompressor      转 720p 并替换原片
 Models/
   PhotoItem / PhotoGroup / AnalysisResult
@@ -38,10 +38,10 @@ Models/
   ├──→ 主线程 onQuickResult(quick)     ← 结果页出现，横幅显示"还在识别"
   ▼
 [阶段 3] contentPass            global(qos: .utility)  ← 降优先级，不跟滚动抢 CPU
-  逐张：320px 分类 → 文档/截图先试二维码 → 文档类补 1024px（二维码 + OCR）
+  逐张：320px 分类 → 文档/截图先试二维码（发票码→发票票据，其余→二维码）→ 文档类补 1024px（二维码 + OCR）
   预算：OCR 3000 张｜1024px 补读 1500 张｜小图读字兜底 200 张｜内存 < 220MB 停补读
   ▼
-[阶段 4] assemble(contentReady: true)   回填分类/发票 → 重算建议分
+[阶段 4] assemble(contentReady: true)   回填分类 → 重算建议分
   ▼
   主线程 completion(final)
 ```
@@ -94,6 +94,8 @@ Models/
 | 隐私缩略图打码 | `@AppStorage("blurPrivacyThumbnails")`，默认 true。分类详情页、清理页网格与列表都读它 | `ContentView` 三处 |
 | 隐私分类显示开关 | `@AppStorage("showPrivacyCategory")`，默认 false。两个隐私类（照片/视频）一起受它控制 | `ContentView` 三处 |
 | 宠物 | 场景标签里有 dog/cat/pet/animal → 补跑 `VNRecognizeAnimalsRequest`，命中 Dog/Cat 且 conf ≥ 0.5 → 直接判宠物（排在美食/风景之前） | `ContentAnalyzer.detectAnimal` |
+| 发票二维码 | `scanQR` 扫到 `01` 开头的国标码（`parseInvoicePayload` 命中）→ 直接归「发票票据」，连读字都省 | `ContentAnalyzer.scanQR` |
+| 通用二维码 | `scanQR` 扫到非空 payload 但**不是**发票码，且当前分类是截图/文档/其他（`isQRWeakCategory`）→ 归「二维码」。优先级：发票 > 二维码 > 截图 > 文档 | `ContentAnalyzer.scanQR` + `AnalysisEngine.contentPass` |
 | 增量命中 | `localIdentifier` 相同 **且** `abs(modificationDate 差) ≤ 1s` | `ScanCache.hit` |
 
 `cleanupScore` 是这些加减分的累加，界面显示为百分比。它表示"综合可疑度"，不是"删除概率"。
@@ -143,7 +145,7 @@ v2 的密度是个**比值**，比值在分母极小时会骗人。头像照就�
 | 手段 | 为什么 |
 |---|---|
 | 每张照片包一层 `autoreleasepool` | PHImageManager 解出的图 + CGContext 是自动释放对象；2 万张不排空会攒到几个 GB，被 jetsam 杀掉（表现为"扫到某百分比突然闪退、无崩溃日志"） |
-| `PHImageManager` 缩略图 320px | 特征计算不需要更大；1024px 只在发票补读时按需取 |
+| `PHImageManager` 缩略图 320px | 特征计算不需要更大；1024px 只在文档补读时按需取 |
 | `MemoryProbe.availableMB() < 220` 停止 1024px 补读 | 大图 + Vision 是最吃内存的一步，先牺牲它保住整轮 |
 | 扫描期间 `isIdleTimerDisabled` | 锁屏 = 挂起，解码与 Vision 请求被系统掐断 |
 | 进度对象 `RefineStatus` 独立 `ObservableObject` | 每几十毫秒变一次；放在 `ContentView.@State` 会让两万条结果页整体重建，滚动卡死 |
