@@ -2,13 +2,66 @@ import SwiftUI
 import Photos
 import UIKit
 
-// MARK: - 卡片里的图
+// MARK: - 打开逐张过的请求（用 item 驱动 sheet，避免快照捕获旧数据）
+
+struct TriageRequest: Identifiable {
+    let id = UUID()
+    let title: String
+    let items: [PhotoItem]
+}
+
+// MARK: - 统一的取图尺寸
+
+/// 预取和显示必须用同一个尺寸，否则缓存永远打不中，划一张卡一下。
+enum TriageMetrics {
+    static var targetSize: CGSize {
+        let w = max(1, UIScreen.main.bounds.width - 40)
+        let h = max(1, UIScreen.main.bounds.height - 220)
+        let scale = UIScreen.main.scale
+        return CGSize(width: w * scale, height: h * scale)
+    }
+}
+
+// MARK: - 图片缓存（划过的、下一张的，都提前备好）
+
+final class TriageImageCache {
+    static let shared = TriageImageCache()
+    private let cache = NSCache<NSString, UIImage>()
+
+    private init() {
+        cache.countLimit = 30
+    }
+
+    func image(for id: String) -> UIImage? {
+        cache.object(forKey: id as NSString)
+    }
+
+    func store(_ image: UIImage, for id: String) {
+        cache.setObject(image, forKey: id as NSString)
+    }
+
+    /// 预取后面几张。已经在缓存里的直接跳过，不会重复解码。
+    func preload(_ items: [PhotoItem]) {
+        let size = TriageMetrics.targetSize
+        for item in items {
+            let id = item.id
+            if image(for: id) != nil { continue }
+            let asset = item.asset
+            PhotoLibraryService.shared.loadImage(for: asset, targetSize: size) { [weak self] img in
+                guard let img = img else { return }
+                self?.store(img, for: id)
+            }
+        }
+    }
+}
+
+// MARK: - 卡片里的一张图
 
 struct TriageImage: View {
-    let asset: PHAsset
+    let item: PhotoItem
 
     @State private var image: UIImage?
-    @State private var requestID: String = ""
+    @State private var loading = false
 
     var body: some View {
         GeometryReader { geo in
@@ -21,33 +74,29 @@ struct TriageImage: View {
                         .frame(width: geo.size.width, height: geo.size.height)
                         .clipped()
                 } else {
-                    ProgressView()
+                    ProgressView().tint(.white)
                 }
             }
-            .onAppear { reload(size: geo.size) }
-            // 关键：卡片在 ZStack 里位置不变，SwiftUI 会复用同一个视图、连 @State 一起留着，
-            // 只在 onAppear 里加载的话，翻到下一张时永远不会重新取图，画面就一直停在第一张。
-            .onChange(of: asset.localIdentifier) { _ in reload(size: geo.size) }
-            .onChange(of: geo.size) { newSize in
-                if image == nil { reload(size: newSize) }
-            }
+            .onAppear(perform: load)
         }
     }
 
-    private func reload(size: CGSize) {
-        guard size.width > 1 else { return }
-        let id = asset.localIdentifier
-        requestID = id
-        image = nil
+    private func load() {
+        if let cached = TriageImageCache.shared.image(for: item.id) {
+            image = cached
+            return
+        }
+        guard !loading else { return }
+        loading = true
 
-        let scale = UIScreen.main.scale
-        let target = CGSize(width: size.width * scale, height: size.height * scale)
-        let assetRef = asset
-
-        PhotoLibraryService.shared.loadImage(for: assetRef, targetSize: target) { img in
+        PhotoLibraryService.shared.loadImage(
+            for: item.asset,
+            targetSize: TriageMetrics.targetSize
+        ) { img in
             DispatchQueue.main.async {
-                // 图是异步回来的，回来时可能已经翻过好几张了
-                guard requestID == id else { return }
+                loading = false
+                guard let img = img else { return }
+                TriageImageCache.shared.store(img, for: item.id)
                 image = img
             }
         }
@@ -65,12 +114,23 @@ struct SwipeTriageView: View {
 
     @State private var index: Int = 0
     @State private var drag: CGSize = .zero
+    /// 非 nil 表示这一张正在飞出（或撤销时正在飞回来）
+    @State private var fly: CGSize?
+    /// 飞出动画期间锁住输入，防止连点/连划导致跳张
+    @State private var busy = false
     @State private var history: [Decision] = []
     @State private var marks: Set<String> = []
+    @State private var hint: String?
 
     private struct Decision {
         let id: String
         let marked: Bool
+    }
+
+    private struct StackEntry: Identifiable {
+        let depth: Int
+        let item: PhotoItem
+        var id: String { item.id }
     }
 
     var body: some View {
@@ -107,8 +167,26 @@ struct SwipeTriageView: View {
                 }
             }
             .padding(.bottom, 16)
+
+            if let hint = hint {
+                VStack {
+                    Text(hint)
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 8)
+                        .background(Capsule().fill(Color.white.opacity(0.18)))
+                    Spacer()
+                }
+                .padding(.top, 56)
+                .transition(.move(edge: .top).combined(with: .opacity))
+                .allowsHitTesting(false)
+            }
         }
         .statusBarHidden(true)
+        .onAppear {
+            TriageImageCache.shared.preload(upcoming(0, 4))
+        }
     }
 
     // MARK: 顶部
@@ -167,34 +245,46 @@ struct SwipeTriageView: View {
         .padding(.top, 10)
     }
 
-    // MARK: 卡片
+    // MARK: 卡片堆
+
+    private var stackEntries: [StackEntry] {
+        guard index < items.count else { return [] }
+        let end = min(index + 3, items.count)
+        var list: [StackEntry] = []
+        list.reserveCapacity(end - index)
+        for raw in index..<end {
+            list.append(StackEntry(depth: raw - index, item: items[raw]))
+        }
+        return list
+    }
 
     private var cardStack: some View {
         GeometryReader { geo in
             let w = geo.size.width
             ZStack {
-                if index + 2 < items.count {
-                    cardBody(items[index + 2], width: w)
-                        .scaleEffect(0.90)
-                        .offset(y: 26)
-                        .opacity(0.45)
+                // 每张卡片用照片自己的 id 做身份：换张就是换视图，
+                // 不会出现「同一个位置复用了上一张的 @State，图停在旧照片」。
+                ForEach(stackEntries) { entry in
+                    let isTop = entry.depth == 0
+                    cardBody(entry.item, width: w)
+                        .overlay(alignment: .topLeading) {
+                            stamp("保留", color: Color(red: 0.25, green: 0.8, blue: 0.48))
+                                .opacity(isTop ? rightProgress : 0)
+                        }
+                        .overlay(alignment: .topTrailing) {
+                            stamp("删除", color: Color(red: 0.96, green: 0.33, blue: 0.27))
+                                .opacity(isTop ? leftProgress : 0)
+                        }
+                        .offset(
+                            x: isTop ? currentOffset.width : 0,
+                            y: isTop ? currentOffset.height * 0.28 : CGFloat(entry.depth) * 12
+                        )
+                        .rotationEffect(.degrees(isTop ? currentRotation : 0))
+                        .scaleEffect(isTop ? 1 : 1 - CGFloat(entry.depth) * 0.05)
+                        .opacity(isTop ? 1 : (entry.depth == 1 ? 0.78 : 0.5))
+                        .zIndex(Double(100 - entry.depth))
+                        .gesture(dragGesture, including: isTop ? .all : .none)
                 }
-                if index + 1 < items.count {
-                    cardBody(items[index + 1], width: w)
-                        .scaleEffect(0.95)
-                        .offset(y: 13)
-                        .opacity(0.75)
-                }
-                cardBody(items[index], width: w)
-                    .overlay(alignment: .topLeading) {
-                        stamp("保留", color: Color(red: 0.25, green: 0.75, blue: 0.45), show: drag.width > 26)
-                    }
-                    .overlay(alignment: .topTrailing) {
-                        stamp("删除", color: Color(red: 0.95, green: 0.3, blue: 0.25), show: drag.width < -26)
-                    }
-                    .offset(x: drag.width, y: drag.height * 0.28)
-                    .rotationEffect(.degrees(Double(drag.width) / 26))
-                    .gesture(dragGesture)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -203,7 +293,7 @@ struct SwipeTriageView: View {
 
     private func cardBody(_ item: PhotoItem, width: CGFloat) -> some View {
         ZStack(alignment: .bottomLeading) {
-            TriageImage(asset: item.asset)
+            TriageImage(item: item)
 
             LinearGradient(
                 colors: [Color.clear, Color.black.opacity(0.65)],
@@ -255,7 +345,7 @@ struct SwipeTriageView: View {
         .shadow(color: Color.black.opacity(0.45), radius: 14, y: 8)
     }
 
-    private func stamp(_ text: String, color: Color, show: Bool) -> some View {
+    private func stamp(_ text: String, color: Color) -> some View {
         Text(text)
             .font(.system(size: 22, weight: .heavy))
             .foregroundColor(color)
@@ -266,22 +356,51 @@ struct SwipeTriageView: View {
                     .stroke(color, lineWidth: 3)
             )
             .rotationEffect(.degrees(-12))
-            .opacity(show ? 1 : 0)
             .padding(22)
     }
 
+    // MARK: 位移 / 旋转 / 印章强度
+
+    private var currentOffset: CGSize {
+        fly ?? drag
+    }
+
+    private var currentRotation: Double {
+        let raw = Double(currentOffset.width) / 20
+        return max(-14, min(14, raw))
+    }
+
+    private var rightProgress: Double {
+        max(0, min(1, Double(currentOffset.width) / 110))
+    }
+
+    private var leftProgress: Double {
+        max(0, min(1, Double(-currentOffset.width) / 110))
+    }
+
+    // MARK: 手势
+
     private var dragGesture: some Gesture {
-        DragGesture()
+        DragGesture(minimumDistance: 6)
             .onChanged { value in
+                guard !busy else { return }
                 drag = value.translation
             }
             .onEnded { value in
-                if value.translation.width > 100 {
+                guard !busy else { return }
+                let dx = value.translation.width
+                let predicted = value.predictedEndTranslation.width
+
+                // Tinder 式判定：要么拖够了，要么甩得快
+                let goRight = dx > 110 || (dx > 42 && predicted > 240)
+                let goLeft = dx < -110 || (dx < -42 && predicted < -240)
+
+                if goRight {
                     commit(keep: true)
-                } else if value.translation.width < -100 {
+                } else if goLeft {
                     commit(keep: false)
                 } else {
-                    withAnimation(.spring(response: 0.3, dampingFraction: 0.75)) {
+                    withAnimation(.spring(response: 0.32, dampingFraction: 0.78)) {
                         drag = .zero
                     }
                 }
@@ -293,15 +412,15 @@ struct SwipeTriageView: View {
     private var actionButtons: some View {
         HStack(spacing: 24) {
             roundButton(icon: "arrow.uturn.backward", label: "撤销",
-                        bg: Color.white.opacity(0.14), enabled: !history.isEmpty) {
+                        bg: Color.white.opacity(0.14), enabled: !history.isEmpty && !busy) {
                 undo()
             }
             roundButton(icon: "checkmark", label: "保留",
-                        bg: Color(red: 0.2, green: 0.62, blue: 0.36), enabled: true) {
+                        bg: Color(red: 0.2, green: 0.62, blue: 0.36), enabled: !busy) {
                 commit(keep: true)
             }
             roundButton(icon: "trash", label: "删除",
-                        bg: Color(red: 0.85, green: 0.24, blue: 0.2), enabled: true) {
+                        bg: Color(red: 0.85, green: 0.24, blue: 0.2), enabled: !busy) {
                 commit(keep: false)
             }
         }
@@ -400,35 +519,93 @@ struct SwipeTriageView: View {
 
     // MARK: 行为
 
-    private func commit(keep: Bool) {
-        guard index < items.count else { return }
-        let item = items[index]
-        let marked = !keep
+    private func upcoming(_ from: Int, _ count: Int) -> [PhotoItem] {
+        guard from < items.count else { return [] }
+        let end = min(from + count, items.count)
+        return Array(items[from..<end])
+    }
 
+    private func commit(keep: Bool) {
+        guard index < items.count, !busy else { return }
+        busy = true
+
+        let item = items[index]
         UIImpactFeedbackGenerator(style: .light).impactOccurred()
 
-        history.append(Decision(id: item.id, marked: marked))
-        if marked {
-            marks.insert(item.id)
-        } else {
+        history.append(Decision(id: item.id, marked: !keep))
+        if keep {
             marks.remove(item.id)
+        } else {
+            marks.insert(item.id)
         }
 
+        let startHeight = drag.height
         withAnimation(.easeOut(duration: 0.22)) {
-            drag = CGSize(width: keep ? 900 : -900, height: drag.height)
+            fly = CGSize(width: keep ? 1000 : -1000, height: startHeight)
         }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-            drag = .zero
-            index += 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.22) {
+            // 换张这一步必须关掉动画：否则离场卡会在被移除前先弹回中间一帧，闪一下。
+            var instant = Transaction()
+            instant.disablesAnimations = true
+            withTransaction(instant) {
+                fly = nil
+                drag = .zero
+                index += 1
+            }
+            busy = false
+            TriageImageCache.shared.preload(upcoming(index, 4))
         }
     }
 
     private func undo() {
-        guard let last = history.popLast() else { return }
+        guard !busy, let last = history.popLast() else { return }
+        busy = true
+        UIImpactFeedbackGenerator(style: .soft).impactOccurred()
+
         marks.remove(last.id)
-        drag = .zero
-        index = max(0, index - 1)
+
+        let target = max(0, index - 1)
+        let fromLeft = last.marked          // 刚才往左飞走的，就从左边回来
+        let entry = CGSize(width: fromLeft ? -320 : 320, height: 0)
+
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) {
+            index = target
+            drag = .zero
+            fly = entry
+        }
+
+        // 先让「换了哪一张」这一帧落地，再播回弹动画，
+        // 否则两次状态改动挤在同一帧里，卡片会直接跳到中间，看不出是从哪边回来的。
+        DispatchQueue.main.async {
+            withAnimation(.spring(response: 0.34, dampingFraction: 0.82)) {
+                fly = .zero
+            }
+        }
+
+        showHint("已撤销，回到第 \(target + 1) 张")
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.42) {
+            var settle = Transaction()
+            settle.disablesAnimations = true
+            withTransaction(settle) {
+                fly = nil
+            }
+            busy = false
+        }
+
+        TriageImageCache.shared.preload(upcoming(target, 4))
+    }
+
+    private func showHint(_ text: String) {
+        withAnimation(.easeOut(duration: 0.18)) { hint = text }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
+            withAnimation(.easeIn(duration: 0.2)) {
+                if hint == text { hint = nil }
+            }
+        }
     }
 
     private func finish() {

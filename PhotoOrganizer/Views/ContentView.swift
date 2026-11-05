@@ -421,7 +421,7 @@ struct ResultView: View {
 
     // 附加面板
     @State private var showDashboard = false
-    @State private var showTriage = false
+    @State private var triage: TriageRequest?
 
     // 视频压缩
     @State private var compressingID: String?
@@ -522,8 +522,8 @@ struct ResultView: View {
                 onGoLarge: { tab = .large }
             )
         }
-        .sheet(isPresented: $showTriage) {
-            SwipeTriageView(title: tab.title, items: currentList()) { marks in
+        .sheet(item: $triage) { request in
+            SwipeTriageView(title: request.title, items: request.items) { marks in
                 guard !marks.isEmpty else { return }
                 selectedIDs.formUnion(marks)
                 showToast("已标记 \(marks.count) 张，点下面红色按钮统一删除")
@@ -1614,7 +1614,7 @@ struct ResultView: View {
             showToast("「\(tab.title)」里没有照片")
             return
         }
-        showTriage = true
+        triage = TriageRequest(title: tab.title, items: list)
     }
 
     private func loadAlbums() {
