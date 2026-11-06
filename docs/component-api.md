@@ -52,7 +52,7 @@
 
 | 类型 | 取值 | 用途 |
 |---|---|---|
-| `ContentCategory` | 发票票据 / **二维码** / 文档 / 截图 / 人物 / 美食 / 风景 / 宠物 / **隐私照片 / 隐私视频** / 其他 | 带 `icon`（SF Symbols）、`isPrivacy`（两个隐私类都算，**别再写 `== .privacy`**）、`isQRWeakCategory`（截图/文档/其他才算，二维码不抢人物/美食/风景/宠物）。`fromCache(_:)` 认 1.4 的旧名「隐私」 |
+| `ContentCategory` | 发票票据 / **二维码** / 文档 / 截图 / 人物 / 美食 / 风景 / 宠物 / **隐私照片 / 隐私视频** / **视频** / 其他 | 带 `icon`（SF Symbols）、`isPrivacy`（两个隐私类都算，**别再写 `== .privacy`**）、`isSoftCategory`（软结论：截图/文档/其他，新信号可以推翻，`isQRWeakCategory` 是它的别名）、`isVideo` 类目只按素材类型落桶。`fromCache(_:)` 认 1.4 的旧名「隐私」 |
 | `ResultTab` | suggested / duplicate / similar / blurry / large / content(ContentCategory) | 结果页标签，带 `title` / `icon` |
 | `LayoutMode` | list(1) / two(2) / three(3) | 列数，`rawValue` 直接当列数 |
 | `AppPhase` | idle / scanning / done | 主容器状态 |
