@@ -89,14 +89,19 @@ Models/
 | 隐私（v2，已被 v3 取代） | 同上但没有躯干闸门，绝对量系数 4% | — |
 | 隐私（v1，已废弃） | 肤色占比 × 人体占比 × 3.2 ≥ 0.34。自拍同时踩中两个因子，必然过线 | — |
 | 隐私不参与打分 | `category.isPrivacy`（照片 / 视频两类）直接跳过 `buildScores`，也不进 `suggestedItems` | `AnalysisEngine.buildScores` |
-| 隐私视频 | 抽帧：封面帧先算；封面肤色 > 0.06 且未过线时，再抽 30% / 65% 两帧（`AVAssetImageGenerator`，`appliesPreferredTrackTransform = true`），取最高分。视频只有这一类进 `categoryBuckets` | `AnalysisEngine.privacyScoreForVideo` |
+| 隐私视频 | 抽帧：封面帧先算；封面肤色 > 0.06 且未过线时，再抽 30% / 65% 两帧（`AVAssetImageGenerator`，`appliesPreferredTrackTransform = true`），取最高分 | `AnalysisEngine.privacyScoreForVideo` |
+| 视频归类 | 视频不跑内容识别（发票/文档/截图对视频没意义）。除了隐私视频单独成桶，其余全部进 `ContentCategory.video`「视频」——分类 tab 必须覆盖全部素材 | `AnalysisEngine.contentPass` + `assemble` |
 | 隐私口径迁移 | `privacyModelVersion`（UserDefaults）小于当前值时，把缓存里隐私条目的 `contentDone` 置回 false，只重判这几百条 | `ScanCache.resetPrivacyJudgements` |
 | 隐私缩略图打码 | `@AppStorage("blurPrivacyThumbnails")`，默认 true。分类详情页、清理页网格与列表都读它 | `ContentView` 三处 |
 | 隐私分类显示开关 | `@AppStorage("showPrivacyCategory")`，默认 false。两个隐私类（照片/视频）一起受它控制 | `ContentView` 三处 |
 | 宠物 | 场景标签里有 dog/cat/pet/animal → 补跑 `VNRecognizeAnimalsRequest`，命中 Dog/Cat 且 conf ≥ 0.5 → 直接判宠物（排在美食/风景之前） | `ContentAnalyzer.detectAnimal` |
 | 发票二维码 | `scanQR` 扫到 `01` 开头的国标码（`parseInvoicePayload` 命中）→ 直接归「发票票据」，连读字都省 | `ContentAnalyzer.scanQR` |
-| 通用二维码 | `scanQR` 扫到非空 payload 但**不是**发票码，且当前分类是截图/文档/其他（`isQRWeakCategory`）→ 归「二维码」。优先级：发票 > 二维码 > 截图 > 文档 | `ContentAnalyzer.scanQR` + `AnalysisEngine.contentPass` |
+| 通用二维码 | `scanQR` 扫到非空 payload 但**不是**发票码，且当前分类是弱结论（截图/文档/其他，`isSoftCategory`）→ 归「二维码」。优先级：发票 > 二维码 > 截图 > 文档 | `ContentAnalyzer.scanQR` + `AnalysisEngine.contentPass` |
 | 增量命中 | `localIdentifier` 相同 **且** `abs(modificationDate 差) ≤ 1s` | `ScanCache.hit` |
+| 结论强度 | **强结论**（发票/人物/美食/风景/宠物/隐私/隐私视频/视频）：新信号永不改判，缓存命中即用；**弱结论**（截图/文档/其他）：只是兜底，新信号来了要重判 | `ContentCategory.isSoftCategory` |
+| 信号版本补扫 | `CachedPhoto.signalVersion < ScanCache.currentSignalVersion` 且是弱结论 → `contentDone` 置回 false 重判。强结论与视频永不重判 | `CachedPhoto.needsContentRescan` |
+| 补扫进度 | 分母用「真正要跑的张数」（`pending`），不是全库；`pending < total` 时 phase 为「正在补扫分类」 | `AnalysisEngine.contentPass` |
+| 隐藏 | `PHAssetChangeRequest.isHidden = true`，进系统「已隐藏」相簿（iOS 16 起需 Face ID）。App 取图 `includeHiddenAssets = false`，所以隐藏后自动从 App 消失；找回走 `smartAlbumAllHidden` | `PhotoLibraryService.setHidden` / `fetchHiddenAssets` |
 
 `cleanupScore` 是这些加减分的累加，界面显示为百分比。它表示"综合可疑度"，不是"删除概率"。
 

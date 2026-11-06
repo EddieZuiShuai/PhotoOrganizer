@@ -312,7 +312,9 @@ final class PhotoLibraryService {
         }
         PHPhotoLibrary.shared().performChanges({
             for asset in assets {
-                PHAssetChangeRequest(for: asset)?.isHidden = hidden
+                // 当前 SDK 里 `PHAssetChangeRequest(for:)` 是非可选的（老文档写的是 `init?`，
+                // 照抄会编译报错：cannot use optional chaining on non-optional value）
+                PHAssetChangeRequest(for: asset).isHidden = hidden
             }
         }, completionHandler: { success, error in
             completion(success, error)

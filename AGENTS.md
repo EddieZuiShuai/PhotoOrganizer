@@ -86,6 +86,9 @@
 - **改隐私公式要作废旧结论** → 缓存里 `contentDone = true` 的条目会整段跳过内容识别。只改算法不作废缓存 = 用户永远看不到修复。作废走 `privacyModelVersion` + `ScanCache.resetPrivacyJudgements()`，**不要动 `ScanCache.version`**（那会作废整库，用户要重扫十几分钟）
 - **`git push` 报 schannel / TLS 错** → 环境里有 `http_proxy=127.0.0.1:5804`，git 走它必然握手失败。可靠写法是**行内清空四个变量**：`http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= git push`（`env -u` 在本机 Bash 里会静默失败，别用）
 - **取缩略图别用 `.fastFormat`** → 在 iOS 18 模拟器上它会返回 `PHPhotosError 3303`（`image=nil`），导致整轮扫描缩略图全 nil、结果页每类都是 0、连「逐张过」入口都不显示（Maestro 9 条 flow 全卡在 `逐张过不可见`）。取图一律 `.opportunistic`（优先快、拿不到回退高质量）；`po-diag.txt` 里三种 deliveryMode 的对比能一眼看出这坑
+- **加新分类要按「软/硬结论」想清楚** → 强结论（发票/人物/美食/风景/宠物/隐私/视频）永不被新信号推翻，缓存命中直接用；弱结论（截图/文档/其他）只是兜底，加新信号必须重判。要重判就把 `ScanCache.currentSignalVersion` +1，**别动 `ScanCache.version`**（那是整库作废）。别给单个分类写「补扫函数」——下次加分类又得写一遍
+- **`CachedPhoto` 加字段一律 Optional** → 合成 Codable 对非 Optional 字段缺失会抛错，`try?` 一吞整份缓存变空，**正好触发想避免的全量重扫**。`signalVersion` 声明成 `Int?`，nil 当 0 处理
+- **分类卡上的「0」必须能区分「真没有」和「还没算」** → 补扫时用 `RefineStatus.backfill` 把数字换成百分比。1.5(23) 用户就是被这个「0」骗去清缓存重扫的
 
 ## 当前版本
 
@@ -95,6 +98,13 @@
 3. **首页首启提示卡**：`tutorialSeenVersion` 驱动，放「开始扫描」下方，看完自动消失（补上了 21 一直缺的「新用户看不到教程入口」）。
 4. **我的 → 帮助与支持**：补「邮件反馈」（`eddie.wu@qq.com`）+「常见问题」5 条。
 5. **清理页瘦身**：删顶部「空间」按钮（和底部 tab 重复）、发票数字换成「相似组」、「正在识别发票与分类」→「正在识别分类」、导出清单按钮及 `exportText` 移除、筛选按钮放大。
+
+`1.5 (24)`：把「新分类永远没数据」这件事从根上解决——
+1. **结论分软硬 + 增量补扫**：`CachedPhoto.signalVersion`（Optional）+ `ScanCache.currentSignalVersion`。新增信号只重判弱结论（截图/文档/其他，约一万条，8~15 分钟），强结论两万条照常命中。以后加分类只要把版本号 +1。
+2. **补扫进度可见**：分类卡在补扫期间显示「62%」而不是「0」；`RefineBanner` 补扫时文案换成「新版本多了识别信号，只重判截图/文档/其他」。
+3. **`ContentCategory.video`**：视频不再被分类 tab 丢掉（以前只判隐私就 `continue`）。详情页按体积倒序 + 分段筛选（全部 / ≥100MB / <100MB）；**不拆「大视频/小视频」两张卡**，否则互斥性就破了。
+4. **隐私「隐藏」**：`PHAssetChangeRequest.isHidden` → 系统「已隐藏」相簿（iOS 16 起要 Face ID）。入口在隐私详情页底部 + 清理页隐私页签；找回走「我的 › 已隐藏的照片」。`hiddenIDs` 和 `deletedIDs` 分开记——隐藏不释放空间。
+5. **视频预览默认静音**：和逐张过对齐；静音时不再无谓激活音频会话（以前会掐掉正在听的音乐）。
 
 `1.5 (23)`：修缩略图取图 `.fastFormat` → `.opportunistic`（iOS 18 模拟器返回 3303 导致扫描全 0，UI 回归 9 条全挂）；UI 回归 9/9 通过后升号出包。
 
