@@ -50,6 +50,9 @@ struct ContentView: View {
     @State private var errorMessage: String?
     /// 第一阶段的结果已经到了、内容识别还在后台跑
     @State private var isRefining = false
+    /// 人脸复核阶段（内容识别之后、只针对单人照/合照）。
+    /// 和 `isRefining` 分开：这一阶段分类已经可用，横幅要留着但不能说「正在识别分类」。
+    @State private var isFaceRefining = false
     @StateObject private var refine = RefineStatus()
     /// 每一次重新扫描 +1。后台回调回来先对号：防止「已经重开一局了，
     /// 上一局的结果页又自己弹回来」。
@@ -76,6 +79,7 @@ struct ContentView: View {
                         MainTabView(
                             result: result,
                             isRefining: isRefining,
+                            isFaceRefining: isFaceRefining,
                             refineStatus: refine,
                             onRestart: reset
                         )
@@ -120,8 +124,10 @@ struct ContentView: View {
         result = nil
         phase = .idle
         isRefining = false
+        isFaceRefining = false
         refine.reset(to: 0)
         refine.backfill = false
+        refine.isFaceRefine = false
         progressValue = 0
         progressText = ""
         processed = 0
@@ -187,14 +193,15 @@ struct ContentView: View {
                 guard scanID == myID else { return }
                 result = res
                 isRefining = false
+                isFaceRefining = false
                 refine.isFaceRefine = false
             } completion: { res in
                 guard scanID == myID else { return }
                 result = res
                 isRefining = false
                 refine.backfill = false
-                // 这里**不能**清 isFaceRefine：复核可能紧接着就在跑，
-                // 清掉会让横幅消失、用户以为全部完成，可过几分钟数字还会跳一次。
+                // 复核紧接着就开始（引擎在 completion 之后才跑），横幅不能断。
+                isFaceRefining = true
             }
         }
     }
@@ -571,6 +578,8 @@ struct ResultView: View {
     let result: AnalysisResult
     /// 内容识别还在后台跑（内容分类还没出来）
     let isRefining: Bool
+    /// 人脸复核阶段。内容识别已经结束（分类可用），只是合照数字还会再刷一次
+    let isFaceRefining: Bool
     let refineStatus: RefineStatus
     let onRestart: () -> Void
 
@@ -1015,7 +1024,7 @@ struct ResultView: View {
                 summaryItem(title: "截图", value: "\(shots.count)", color: Color(red: 0.4, green: 0.45, blue: 0.5))
             }
 
-            if isRefining || refineStatus.isFaceRefine {
+            if isRefining || isFaceRefining {
                 RefineBanner(status: refineStatus)
             }
 
@@ -2487,6 +2496,10 @@ enum MainTab: String, CaseIterable, Identifiable {
 struct MainTabView: View {
     let result: AnalysisResult
     let isRefining: Bool
+    /// 人脸复核还在跑。单独一个 Bool 而不是直接读 `refineStatus.isFaceRefine`：
+    /// ResultView 是 `let refineStatus`（不订阅），读它不会触发重画，横幅会不出现；
+    /// 改成 @ObservedObject 又会让两万多条的列表跟着每次进度回调一起重画。
+    let isFaceRefining: Bool
     let refineStatus: RefineStatus
     let onRestart: () -> Void
 
@@ -2502,6 +2515,7 @@ struct MainTabView: View {
             ResultView(
                 result: result,
                 isRefining: isRefining,
+                isFaceRefining: isFaceRefining,
                 refineStatus: refineStatus,
                 deletedIDs: $deletedIDs,
                 hiddenIDs: $hiddenIDs,
