@@ -666,6 +666,7 @@ struct ResultView: View {
     init(
         result: AnalysisResult,
         isRefining: Bool = false,
+        isFaceRefining: Bool = false,
         refineStatus: RefineStatus = RefineStatus(),
         deletedIDs: Binding<Set<String>>,
         hiddenIDs: Binding<Set<String>>,
@@ -674,6 +675,7 @@ struct ResultView: View {
     ) {
         self.result = result
         self.isRefining = isRefining
+        self.isFaceRefining = isFaceRefining
         self.refineStatus = refineStatus
         self.onRestart = onRestart
         self._deletedIDs = deletedIDs
