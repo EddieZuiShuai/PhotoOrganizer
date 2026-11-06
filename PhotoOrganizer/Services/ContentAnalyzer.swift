@@ -210,6 +210,23 @@ final class ContentAnalyzer {
         return out
     }
 
+    /// 只数脸，不分类。
+    ///
+    /// 给「人脸精细复核」用：同一张图换更高分辨率再跑一遍，看看到底有几张脸。
+    /// 320px 上十人合影每张脸只有十几像素，`VNDetectFaceRectangles` 会一个都认不出来，
+    /// 这类照片本来该是「合照」却被判成「单人照」——复核就是补这一段。
+    func faceCount(in image: UIImage) -> Int {
+        guard let cgImage = image.cgImage else { return 0 }
+        let request = VNDetectFaceRectanglesRequest()
+        let handler = VNImageRequestHandler(
+            cgImage: cgImage,
+            orientation: Self.orientation(from: image.imageOrientation),
+            options: [:]
+        )
+        guard (try? handler.perform([request])) != nil else { return 0 }
+        return request.results?.count ?? 0
+    }
+
     /// 专用动物模型只认猫和狗（系统目前就这两个 identifier），但认得比场景分类准。
     private func detectAnimal(cgImage: CGImage, orientation: CGImagePropertyOrientation) -> Bool {
         let req = VNRecognizeAnimalsRequest()
@@ -248,8 +265,9 @@ final class ContentAnalyzer {
 
         // ① 人像优先：脸够大（>8% 画面）或者有两张以上的脸。
         //    「举着文件的半身照」「证件照」都属于这一类，先抢下来。
+        //    1.5(25) 起「人物」拆成两张卡：两张以上的脸就是合照，否则单人照。
         if faceArea >= 0.08 || faceCount >= 2 {
-            return .person
+            return faceCount >= 2 ? .groupPhoto : .singlePerson
         }
 
         // ② 文档：必须有强信号，且置信度够高。
@@ -279,7 +297,10 @@ final class ContentAnalyzer {
             return .pet
         }
         if faceCount > 0 || hasAny(labels, ["person", "people", "portrait", "selfie", "human", "face", "child", "man", "woman", "baby"]) {
-            return .person
+            // 走到这里 faceCount 最多是 1（≥2 在前面已经被合照抢走了）。
+            // 场景标签说是人像但一个脸都没检出，多半是远景/背影——归单人照，
+            // 不归合照：没有第二个人的证据。
+            return faceCount >= 2 ? .groupPhoto : .singlePerson
         }
         // 「网图表情」这个分类已经去掉：系统分类模型对 cartoon / illustration 的召回太宽，
         // 正常插画、海报、截图都会被拖进来，用户实际用不上，还污染其他分组。

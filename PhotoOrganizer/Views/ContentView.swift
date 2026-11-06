@@ -23,6 +23,10 @@ final class RefineStatus: ObservableObject {
     /// 分类卡要靠它决定显示「补扫中 62%」还是「0」——两者长得一样的话，
     /// 用户只能靠猜，猜完就跑去清缓存重扫（1.5(23) 的真实反馈）。
     @Published var backfill: Bool = false
+    /// 内容识别跑完之后，还会接着跑一轮「人脸精细复核」（只针对单人照/合照）。
+    /// 复核的池子只有几千张，和内容识别的分母不一样，进度条会从 100% 掉回 0%——
+    /// 不单独标出来的话用户会以为卡死了。
+    @Published var isFaceRefine: Bool = false
 
     var percent: Int {
         guard total > 0 else { return 0 }
@@ -174,12 +178,16 @@ struct ContentView: View {
                     refine.total = all
                     refine.phaseText = text
                     refine.backfill = text.contains("补扫")
+                    // 人脸复核的池子和内容识别不是一批人，进度得分开标，
+                    // 否则百分比从 100% 掉回 0% 会被当成卡死。
+                    refine.isFaceRefine = text.contains("复核")
                 }
             } completion: { res in
                 guard scanID == myID else { return }
                 result = res
                 isRefining = false
                 refine.backfill = false
+                refine.isFaceRefine = false
             }
         }
     }
@@ -279,7 +287,7 @@ struct HomeView: View {
                     Divider()
                     featureRow(icon: "doc.text.fill", title: "发票票据", desc: "自动认出发票、收据、小票，可按类整批处理")
                     Divider()
-                    featureRow(icon: "person.fill", title: "内容分类", desc: "人物 / 美食 / 风景 / 宠物 / 截图 自动归类")
+                    featureRow(icon: "person.3.fill", title: "内容分类", desc: "单人照 / 合照 / 美食 / 风景 / 宠物 / 截图 自动归类")
                 }
                 .padding(18)
                 .background(Color.white)
@@ -578,6 +586,13 @@ struct ResultView: View {
     @State private var tab: ResultTab = .suggested
     @State private var selectedIDs: Set<String> = []
 
+    /// 「建议清理」的排序：默认按时间（由近到远），可以切回按建议分。
+    ///
+    /// 为什么不一刀切改成时间：这一页唯一的价值就是「最该删的排前面」。
+    /// 但用户找照片的习惯是按时间翻（1.5(25) 的反馈），两个诉求都要留。
+    /// 存 @AppStorage，切过一次以后一直按他选的来。
+    @AppStorage("suggestedSortByScore") private var suggestedSortByScore: Bool = false
+
     /// 用「要预览的对象」来控制弹出，而不是 Bool + 三个并列状态。
     /// 后者在第一次弹出时会拿到尚未更新的空数组（SwiftUI 的呈现内容按快照捕获），
     /// 表现就是「第一次点开照片永远是空白页」。
@@ -851,7 +866,11 @@ struct ResultView: View {
     }
 
     private var suggested: [PhotoItem] {
-        result.suggestedItems.filter { !deletedIDs.contains($0.id) && passes($0) }
+        let base = result.suggestedItems.filter { !deletedIDs.contains($0.id) && passes($0) }
+        // 引擎给的就是时间降序（fetchAssets 的 creationDate desc）。
+        // 只有用户主动切成「按建议分」时才重排——两万条排一次几十毫秒，不亏。
+        guard suggestedSortByScore else { return base }
+        return base.sorted { $0.cleanupScore > $1.cleanupScore }
     }
 
     /// 模糊参考值：整个相册的中位清晰度。低于它的比例越小越可能是糊片。
@@ -1218,6 +1237,9 @@ struct ResultView: View {
             if tab == .blurry {
                 blurLevelBar
             }
+            if tab == .suggested {
+                suggestedSortBar
+            }
         }
         .padding(.horizontal, 16)
         .padding(.top, 2)
@@ -1245,6 +1267,39 @@ struct ResultView: View {
         }
         .padding(2)
         .background(RoundedRectangle(cornerRadius: 7).fill(Color.white))
+    }
+
+    /// 「建议清理」的排序切换。默认「由近到远」，和模糊/分类/重复一条时间轴；
+    /// 想按「最该删的在前」看，切右边那个。
+    private var suggestedSortBar: some View {
+        HStack(spacing: 6) {
+            Text("排序")
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+
+            HStack(spacing: 2) {
+                ForEach([false, true], id: \.self) { byScore in
+                    Button {
+                        suggestedSortByScore = byScore
+                    } label: {
+                        Text(byScore ? "建议分" : "由近到远")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundColor(suggestedSortByScore == byScore ? .white : .secondary)
+                            .padding(.horizontal, 9)
+                            .padding(.vertical, 4)
+                            .background(
+                                Capsule().fill(
+                                    suggestedSortByScore == byScore ? blue : Color.black.opacity(0.05)
+                                )
+                            )
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier(byScore ? "suggested-sort-score" : "suggested-sort-time")
+                }
+            }
+
+            Spacer(minLength: 4)
+        }
     }
 
     private var blurLevelBar: some View {
@@ -2118,6 +2173,27 @@ struct ResultView: View {
 struct RefineBanner: View {
     @ObservedObject var status: RefineStatus
 
+    private var title: String {
+        if status.isFaceRefine {
+            return status.total > 0
+                ? "正在复核合照 \(status.percent)%（\(status.done)/\(status.total)）"
+                : "正在复核合照…"
+        }
+        if status.total > 0 {
+            return "\(status.backfill ? "正在补扫分类" : "正在识别分类") \(status.percent)%（\(status.done)/\(status.total)）"
+        }
+        return status.backfill ? "正在补扫分类…" : "正在识别分类…"
+    }
+
+    private var detail: String {
+        if status.isFaceRefine {
+            return "在更高分辨率上重数人脸，把远景合影从单人照里挑出来；其余分类已经可用"
+        }
+        return status.backfill
+            ? "新版本多了识别信号，只重判截图/文档/其他/二维码；其余分类不受影响"
+            : "重复、相似、模糊已经算完，可以先动手；识别完会自动补上内容分类"
+    }
+
     var body: some View {
         HStack(spacing: 8) {
             ProgressView()
@@ -2125,15 +2201,11 @@ struct RefineBanner: View {
                 .frame(width: 16, height: 16)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(status.total > 0
-                     ? "\(status.backfill ? "正在补扫分类" : "正在识别分类") \(status.percent)%（\(status.done)/\(status.total)）"
-                     : (status.backfill ? "正在补扫分类…" : "正在识别分类…"))
+                Text(title)
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.primary)
 
-                Text(status.backfill
-                     ? "新版本多了识别信号，只重判截图/文档/其他；其余分类不受影响"
-                     : "重复、相似、模糊已经算完，可以先动手；识别完会自动补上内容分类")
+                Text(detail)
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
                     .lineLimit(2)
@@ -2532,12 +2604,13 @@ struct CategoryOverviewView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
-                    VStack(alignment: .leading, spacing: 4) {
+                    VStack(alignment: .leading, spacing: 6) {
                         Text("按内容分类")
                             .font(.system(size: 20, weight: .semibold))
                         Text("点一张卡片，进这一类里逐张看、整批挑")
                             .font(.system(size: 12))
                             .foregroundColor(.secondary)
+                        reconcileRow
                     }
                     .padding(.top, 6)
 
@@ -2549,7 +2622,9 @@ struct CategoryOverviewView: View {
                                     category,
                                     count: items.count,
                                     bytes: items.reduce(Int64(0)) { $0 + max(0, $1.fileSize) },
-                                    refilling: refineStatus.backfill && category.isSoftCategory
+                                    refilling: refineStatus.backfill && category.isSoftCategory,
+                                    verifying: refineStatus.isFaceRefine
+                                        && (category == .singlePerson || category == .groupPhoto)
                                 )
                             }
                             .buttonStyle(.plain)
@@ -2581,7 +2656,61 @@ struct CategoryOverviewView: View {
         }
     }
 
-    private func categoryCard(_ category: ContentCategory, count: Int, bytes: Int64, refilling: Bool) -> some View {
+    /// 当前还在相册里的素材总数（扣掉这一轮刚删的、刚隐藏的）。
+    private var liveTotal: Int {
+        result.items.filter {
+            !deletedIDs.contains($0.id) && !hiddenIDs.contains($0.id)
+        }.count
+    }
+
+    /// 界面上这些卡片的数字之和。和 `liveTotal` 对上，就说明「互斥且完整」——
+    /// 每张素材只落一个桶，一张不落、一张不重。
+    private var visibleSum: Int {
+        ContentCategory.allCases
+            .filter { !$0.isPrivacy || showPrivacyCategory }
+            .reduce(0) { $0 + alive($1).count }
+    }
+
+    /// 对账行：把「加起来等不等于相册」直接写在页面上。
+    ///
+    /// 以前用户只能自己按计算器，对不上还会以为程序漏了照片；
+    /// 实际最常见的差额是**隐私两张卡被设置开关藏起来了**（默认就是关的）。
+    /// 与其写在文档里，不如挂在这里——差多少、差在哪，一眼看到。
+    @ViewBuilder
+    private var reconcileRow: some View {
+        let total = liveTotal
+        let sum = visibleSum
+        let diff = total - sum
+
+        HStack(spacing: 5) {
+            Image(systemName: diff == 0 ? "checkmark.circle.fill" : "info.circle.fill")
+                .font(.system(size: 10))
+                .foregroundColor(diff == 0 ? Color(red: 0.2, green: 0.6, blue: 0.4) : Color(red: 0.75, green: 0.5, blue: 0.2))
+            Text(reconcileText(total: total, sum: sum, diff: diff))
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.top, 2)
+    }
+
+    private func reconcileText(total: Int, sum: Int, diff: Int) -> String {
+        if diff == 0 {
+            return "合计 \(sum) 项，和相册里的 \(total) 项完全对上"
+        }
+        if !showPrivacyCategory {
+            return "合计 \(sum) 项，还差 \(diff) 项在隐私分类里（设置里打开「隐私分类」就能看到）"
+        }
+        return "合计 \(sum) 项，相册 \(total) 项，差 \(diff) 项"
+    }
+
+    private func categoryCard(
+        _ category: ContentCategory,
+        count: Int,
+        bytes: Int64,
+        refilling: Bool,
+        verifying: Bool
+    ) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: category.icon)
@@ -2590,14 +2719,24 @@ struct CategoryOverviewView: View {
                 Spacer()
                 // 补扫中就把数字换成百分比：这一类的旧结论正在被推翻重判，
                 // 此时显示「0」是在撒谎——不是没有，是还没算完。
-                Text(refilling ? "\(refineStatus.percent)%" : "\(count)")
-                    .font(.system(size: refilling ? 17 : 22, weight: .semibold))
-                    .foregroundColor(refilling ? color(for: category)
-                                     : (count == 0 ? Color.secondary.opacity(0.5) : .primary))
+                // 人脸复核同理：数字马上会变，先别给一个会被打脸的数。
+                if refilling {
+                    Text("\(refineStatus.percent)%")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundColor(color(for: category))
+                } else if verifying {
+                    Text("复核中")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(color(for: category))
+                } else {
+                    Text("\(count)")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(count == 0 ? Color.secondary.opacity(0.5) : .primary)
+                }
             }
             Text(category.rawValue)
                 .font(.system(size: 14, weight: .medium))
-            Text(refilling ? "补扫中…" : (count == 0 ? "暂无" : byteText(bytes)))
+            Text(refilling ? "补扫中…" : (verifying ? "重数人脸…" : (count == 0 ? "暂无" : byteText(bytes))))
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
         }
@@ -2613,7 +2752,8 @@ struct CategoryOverviewView: View {
         case .qrCode: return Color(red: 0.15, green: 0.45, blue: 0.6)
         case .document: return Color(red: 0.35, green: 0.45, blue: 0.55)
         case .screenshot: return Color(red: 0.4, green: 0.45, blue: 0.5)
-        case .person: return Color(red: 0.85, green: 0.45, blue: 0.4)
+        case .singlePerson: return Color(red: 0.85, green: 0.45, blue: 0.4)
+        case .groupPhoto: return Color(red: 0.88, green: 0.6, blue: 0.32)
         case .food: return Color(red: 0.9, green: 0.55, blue: 0.2)
         case .scenery: return Color(red: 0.25, green: 0.6, blue: 0.5)
         case .pet: return Color(red: 0.55, green: 0.42, blue: 0.3)

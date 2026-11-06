@@ -75,11 +75,20 @@ final class AnalysisEngine {
             items = refined
             let tContent = CFAbsoluteTimeGetCurrent() - tContentStart
 
+            // ---------- 阶段 3.5：人脸精细复核 ----------
+            // 只跑人物类（几千张，几分钟）。放在 assemble 之前，分类结果一次到位；
+            // 清理建议在阶段 2 就已经出去了，用户不用等这一轮才能动手。
+            let tFaceStart = CFAbsoluteTimeGetCurrent()
+            items = DispatchQueue.global(qos: .utility).sync { () -> [PhotoItem] in
+                self.refineFacesPass(items, assets: assets, progress: refineProgress)
+            }
+            let tFace = CFAbsoluteTimeGetCurrent() - tFaceStart
+
             // ---------- 阶段 4：内容信号回填后重算 ----------
             let final = self.assemble(items: items, grouped: grouped, contentReady: true)
 
-            NSLog("[PhotoOrganizer][Scan] 阶段二 内容识别 %.1fs｜全流程 %.1fs",
-                  tContent, CFAbsoluteTimeGetCurrent() - tStart)
+            NSLog("[PhotoOrganizer][Scan] 阶段二 内容识别 %.1fs + 人脸复核 %.1fs｜全流程 %.1fs",
+                  tContent, tFace, CFAbsoluteTimeGetCurrent() - tStart)
             ScanCache.shared.logStats()
 
             DispatchQueue.main.async {
@@ -305,9 +314,12 @@ final class AnalysisEngine {
         result.screenshotItems = scored.filter { item in
             return !item.isVideo && item.isScreenshot
         }
+        // 1.5(25)：默认按时间由近到远，和模糊/分类/重复保持一致。
+        // `scored` 本来就是 fetchAssets 的 creationDate 降序，所以这里不再 sort。
+        // 「最该删的在前」改由界面上的排序切换提供——两个诉求都留得住，
+        // 而不是二选一（把分数最高的那张埋到第 300 位，这一页就废了一半）。
         result.suggestedItems = scored
             .filter { !$0.isVideo && !$0.isFavorite && $0.cleanupScore >= 0.5 && !$0.category.isPrivacy }
-            .sorted { $0.cleanupScore > $1.cleanupScore }
 
         // 内容没跑完就不出分类：否则「其他 22066」会像 bug 一样挂在结果页上
         if contentReady {
@@ -398,6 +410,12 @@ final class AnalysisEngine {
         // 靠「小图上读到字」兜底的那批：容易一大片，单独卡死
         let detailTextBudget = 200
         var detailTextUsed = 0
+        // 截图专用的小额 OCR 池：只给「扫到码但解析不出国标格式」的截图用。
+        // 混进 ocrBudget 会挤掉文档类（纸质发票就在那一批里），所以单独开一个。
+        let shotQrOcrBudget = 300
+        var shotQrOcrUsed = 0
+        /// 这一轮里「扫到了通用二维码、但先不落地」的张数，只用于日志对账。
+        var qrDeferred = 0
 
         var qrTried = 0
         var qrHits = 0
@@ -463,6 +481,10 @@ final class AnalysisEngine {
                 guard let thumb = library.thumbnail(for: asset, maxPixel: 320) else { return }
                 tThumb += CFAbsoluteTimeGetCurrent() - t0
 
+                // 1.5(25)：这一张如果扫到了通用二维码，先记着，等所有强证据说完话再落地。
+                // 声明在取图之后，每一张都从 false 重新开始。
+                var sawGenericQR = false
+
                 let t1 = CFAbsoluteTimeGetCurrent()
                 let content = ContentAnalyzer.shared.classify(image: thumb, isScreenshot: item.isScreenshot)
                 out[i].category = content.category
@@ -489,7 +511,12 @@ final class AnalysisEngine {
                 }
 
                 // ① 小图上先扫一眼二维码。截图里的发票、离得近拍的发票，320px 也常读得出；
-                //    命中就到此为止，既不用取大图也不用读字。
+                //    命中发票码就到此为止，既不用取大图也不用读字。
+                //
+                //    1.5(25) 修的就是这里：以前扫到**任意**二维码就改判成「二维码」并 return，
+                //    于是「带收款码的印刷发票」在 320px 上被归成二维码，
+                //    下面 ② 那个 1024px 大图 OCR 永远轮不到——这是发票数偏低的根因。
+                //    现在只记 `sawGenericQR`，不改判也不返回，让后面的强证据先说话。
                 if content.documentLike || item.isScreenshot {
                     qrTried += 1
                     let t2 = CFAbsoluteTimeGetCurrent()
@@ -501,11 +528,8 @@ final class AnalysisEngine {
                         out[i].ocrHits = info.hits
                         return
                     }
-                    // 非发票二维码：只在「截图/文档/其他」这种弱分类上生效，
-                    // 不抢人物/美食/风景/宠物已经拿到的结论。
-                    if scan.payload != nil && out[i].category.isQRWeakCategory {
-                        out[i].category = .qrCode
-                        return
+                    if scan.payload != nil {
+                        sawGenericQR = true
                     }
                 }
 
@@ -528,9 +552,8 @@ final class AnalysisEngine {
                             out[i].ocrHits = info.hits
                             return
                         }
-                        if scan.payload != nil && out[i].category.isQRWeakCategory {
-                            out[i].category = .qrCode
-                            return
+                        if scan.payload != nil {
+                            sawGenericQR = true
                         }
 
                         let t4 = CFAbsoluteTimeGetCurrent()
@@ -547,8 +570,27 @@ final class AnalysisEngine {
                     }
                 }
 
+                // ②' 带二维码的截图：绝大多数「截图 + 码」就是二维码本身，
+                //     扫完码就该直接归二维码，不必再读字。
+                //     但极少数电子发票截图的码解析不出国标格式，得靠读字兜底——
+                //     所以给这类截图单独一个 300 次的小池子。放进 ocrBudget 的话，
+                //     一万多张截图会把 3000 次吃干净，真正需要读字的纸质发票反而轮不到。
+                if item.isScreenshot && sawGenericQR && shotQrOcrUsed < shotQrOcrBudget {
+                    shotQrOcrUsed += 1
+                    let tShot = CFAbsoluteTimeGetCurrent()
+                    let detail = ContentAnalyzer.shared.ocrOnly(image: thumb)
+                    tOCR += CFAbsoluteTimeGetCurrent() - tShot
+                    if !detail.receiptHits.isEmpty {
+                        out[i].category = .receipt
+                        out[i].ocrHits = Array(detail.receiptHits.prefix(4))
+                        return
+                    }
+                }
+
                 // ③ 其余「有字的东西」：在 320px 小图上读一次（菜单、路牌、聊天截图…）
-                if content.textLike && ocrUsed < ocrBudget {
+                //    带码的截图已经走过上面那个专用池子，这里跳过，别重复花预算。
+                let shotQRHandled = item.isScreenshot && sawGenericQR
+                if content.textLike && !shotQRHandled && ocrUsed < ocrBudget {
                     ocrUsed += 1
                     let t5 = CFAbsoluteTimeGetCurrent()
                     let detail = ContentAnalyzer.shared.ocrOnly(image: thumb)
@@ -580,9 +622,8 @@ final class AnalysisEngine {
                                 out[i].ocrHits = info.hits
                                 return
                             }
-                            if scan.payload != nil && out[i].category.isQRWeakCategory {
-                                out[i].category = .qrCode
-                                return
+                            if scan.payload != nil {
+                                sawGenericQR = true
                             }
 
                             let t7 = CFAbsoluteTimeGetCurrent()
@@ -594,6 +635,17 @@ final class AnalysisEngine {
                             }
                         }
                     }
+                }
+
+                // 所有强证据都跑完了，二维码才落地。
+                //
+                // 优先级：发票 > 二维码 > 截图 > 文档 > 其他。
+                // 之前是「二维码 > 一切」，因为扫到码就立刻 return；现在二维码退到
+                // 只压得住弱分类（截图 / 文档 / 其他 / 二维码自己）的位置——
+                // 人物、美食、风景、宠物这些是强结论，二维码抢不走。
+                if sawGenericQR && out[i].category.isSoftCategory {
+                    out[i].category = .qrCode
+                    qrDeferred += 1
                 }
             }
 
@@ -610,10 +662,85 @@ final class AnalysisEngine {
 
         ScanCache.shared.flush()
 
-        NSLog("[PhotoOrganizer][Scan] 内容识别 %d 张（跳过已识别 %d 张）/ %.1fs｜取图 %.1fs｜分类 %.1fs｜二维码 %.1fs（试 %d 次，命中 %d）｜OCR %.1fs（%d 次，大图 %d 张，因内存跳过 %d 张）",
+        NSLog("[PhotoOrganizer][Scan] 内容识别 %d 张（跳过已识别 %d 张）/ %.1fs｜取图 %.1fs｜分类 %.1fs｜二维码 %.1fs（试 %d 次，发票命中 %d 次，延后落地 %d 次）｜OCR %.1fs（主池 %d 次，截图纸池 %d 次，大图 %d 张，因内存跳过 %d 张）",
               total, contentSkipped, CFAbsoluteTimeGetCurrent() - start, tThumb, tClassify,
-              tQR, qrTried, qrHits, tOCR, ocrUsed, bigCount, memSkips)
+              tQR, qrTried, qrHits, qrDeferred, tOCR, ocrUsed, shotQrOcrUsed, bigCount, memSkips)
 
+        return out
+    }
+
+    // MARK: - 阶段 3.5：人脸精细复核
+
+    /// 对人物类的照片在更高分辨率上重数一次人脸，把远景合影从「单人照」里挑出来。
+    ///
+    /// 为什么非要做这一轮：分类主链路拿的是 320px 缩略图。一张十人合影缩到这个尺寸，
+    /// 每张脸只剩十几像素，`VNDetectFaceRectangles` 一个都认不出来，于是整张被判成
+    /// 「单人照」——这正好是拆分之后最容易被用户发现的错误。
+    ///
+    /// 三个刻意的取舍：
+    /// - **只跑人物类**，别的一个都不碰（两万张里只挑那几千）。
+    /// - **小图上已经数出 ≥2 张脸的直接跳过**：结论已经是对的，复核只是浪费解码。
+    /// - **512px 而不是 1024px**：能救回远景小脸，解码时间只有一半左右。
+    ///   再大的图收益很小——真正只有几个像素的脸，1024 也认不出来。
+    ///
+    /// 结果写进 `faceCountFine` 并立刻落缓存，下次扫描一条都不重算。
+    private func refineFacesPass(
+        _ items: [PhotoItem],
+        assets: [PHAsset],
+        progress: ((Int, Int, String) -> Void)?
+    ) -> [PhotoItem] {
+        let tStart = CFAbsoluteTimeGetCurrent()
+        let library = PhotoLibraryService.shared
+        var out = items
+        let total = min(out.count, assets.count)
+
+        func needsRefine(_ item: PhotoItem) -> Bool {
+            guard !item.isVideo else { return false }
+            guard item.category == .singlePerson || item.category == .groupPhoto else { return false }
+            guard item.faceCountFine == nil else { return false }
+            // 已经数出两张以上的脸，分类本来就是合照，不用再验
+            return item.faceCount < 2
+        }
+
+        var pending = 0
+        for i in 0..<total where needsRefine(out[i]) { pending += 1 }
+        guard pending > 0 else { return out }
+
+        progress?(0, pending, "正在复核合照")
+        var done = 0
+
+        for i in 0..<total where needsRefine(out[i]) {
+            autoreleasepool {
+                guard let big = library.thumbnail(for: assets[i], maxPixel: 512) else {
+                    // 取不到图（iCloud 未下载等）：把旧结论固化下来，
+                    // 否则每次扫描都会重试这一张，白花时间还永远成功不了。
+                    out[i].faceCountFine = out[i].faceCount
+                    ScanCache.shared.store(out[i], asset: assets[i])
+                    done += 1
+                    return
+                }
+
+                let n = ContentAnalyzer.shared.faceCount(in: big)
+                out[i].faceCountFine = n
+
+                // 复核结论可以直接覆盖分类：两张脸以上是合照，其余留单人照。
+                // 一个脸都没检出时**不**把人像照片赶出去——场景标签说是人像、
+                // 但人物是背影或远景，那种照片本来就该留在单人照里。
+                out[i].category = n >= 2 ? .groupPhoto : .singlePerson
+
+                out[i].contentDone = true
+                ScanCache.shared.store(out[i], asset: assets[i])
+
+                done += 1
+                if done % 20 == 0 || done == pending {
+                    progress?(done, pending, "正在复核合照")
+                }
+            }
+        }
+
+        ScanCache.shared.flush()
+        NSLog("[PhotoOrganizer][Scan] 人脸复核 %d 张 / %.1fs", done,
+              CFAbsoluteTimeGetCurrent() - tStart)
         return out
     }
 
@@ -824,7 +951,15 @@ final class AnalysisEngine {
             for m in members { memberIDs.insert(m.id) }
         }
 
-        groups.sort { $0.items.count > $1.items.count }
+        // 组间按「组里最新那张」的时间降序，整份列表就是一条时间轴。
+        // 以前按成员数排，一个 2022 年的 5 张组会压住昨天的 2 张组——
+        // 用户找重复时想的是「最近这批怎么重了」，不是「哪组最大」。
+        // 组内成员本来就是时间降序（photos 的顺序），刷新后也不变。
+        groups.sort { a, b in
+            let ta = a.items.first?.creationDate ?? .distantPast
+            let tb = b.items.first?.creationDate ?? .distantPast
+            return ta > tb
+        }
         return (groups, memberIDs)
     }
 
@@ -862,7 +997,12 @@ final class AnalysisEngine {
             }
         }
 
-        groups.sort { $0.items.count > $1.items.count }
+        // 组间同样按组内最新一张的时间降序，见 `findExactGroups` 里的说明。
+        groups.sort { a, b in
+            let ta = a.items.first?.creationDate ?? .distantPast
+            let tb = b.items.first?.creationDate ?? .distantPast
+            return ta > tb
+        }
         return groups
     }
 
@@ -1076,6 +1216,9 @@ struct CachedPhoto: Codable {
     var ocrHits: [String]
     var faceCount: Int
     var faceArea: Double
+    /// 1024px 上重数的人脸数。Optional 同理：老缓存要能解出来，
+    /// 缺失当「没复核过」，扫描收尾时会补上。
+    var faceCountFine: Int?
     var privacyScore: Double
     var contentDone: Bool
     /// 算出这条内容结论时用的信号版本，见 `ScanCache.currentSignalVersion`。
@@ -1105,6 +1248,7 @@ struct CachedPhoto: Codable {
         self.ocrHits = item.ocrHits
         self.faceCount = item.faceCount
         self.faceArea = item.faceArea
+        self.faceCountFine = item.faceCountFine
         self.privacyScore = item.privacyScore
         self.contentDone = item.contentDone
         self.signalVersion = ScanCache.currentSignalVersion
@@ -1136,6 +1280,18 @@ struct CachedPhoto: Codable {
         item.ocrHits = ocrHits
         item.faceCount = faceCount
         item.faceArea = faceArea
+        item.faceCountFine = faceCountFine
+        // 1.5(25) 把「人物」拆成单人照 / 合照：老缓存里存的是「人物」，
+        // fromCache 先落到单人照，这里再用早就存着的 faceCount 就地拆开。
+        // 不这么做的话，所有老照片会永远停在「单人照」——它们的 contentDone
+        // 已经是 true，强结论又不重判，等于拆分对老用户失效。
+        if item.category == .singlePerson {
+            if let fine = faceCountFine {
+                item.category = fine >= 2 ? .groupPhoto : .singlePerson
+            } else if faceCount >= 2 {
+                item.category = .groupPhoto
+            }
+        }
         item.privacyScore = privacyScore
         item.contentDone = contentDone
     }
@@ -1162,7 +1318,11 @@ final class ScanCache {
     ///
     /// 1 = 1.5(24) 加入通用二维码。以前是给二维码单写一个补扫函数，
     /// 下次加「聊天截图」又得再写一遍；现在只需要把这个数字 +1。
-    static let currentSignalVersion = 1
+    ///
+    /// 2 = 1.5(25) 修发票优先级（发票 > 二维码 > 截图 > 文档）。
+    /// 这一版把「二维码」也划进弱结论，所以升级后**已经判成二维码的照片会重判一轮**——
+    /// 否则那些被通用码抢走的印刷发票永远修不回来（它们 contentDone 早就是 true）。
+    static let currentSignalVersion = 2
 
     private let io = DispatchQueue(label: "com.eddie.photoorganizer.scancache", qos: .utility)
     /// 扫描线程写、界面线程读，必须加锁。锁里只做字典操作，不碰 IO。
