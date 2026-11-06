@@ -38,7 +38,7 @@ Models/
   ├──→ 主线程 onQuickResult(quick)     ← 结果页出现，横幅显示"还在识别"
   ▼
 [阶段 3] contentPass            global(qos: .utility)  ← 降优先级，不跟滚动抢 CPU
-  逐张：320px 分类 → 文档/截图先试二维码（发票码→发票票据，其余→二维码）→ 文档类补 1024px（二维码 + OCR）
+  逐张：320px 分类 → 文档/截图先试二维码（发票码→发票票据；其余只记 `sawGenericQR`，最后按弱分类落地）→ 文档类补 1024px（二维码 + OCR）
   预算：OCR 3000 张｜1024px 补读 1500 张｜小图读字兜底 200 张｜内存 < 220MB 停补读
   ▼
 [阶段 4] assemble(contentReady: true)   回填分类 → 重算建议分
@@ -81,7 +81,10 @@ Models/
 | 相似组非最清晰张 | +0.45 | 同上 |
 | 减分：发票 | -0.45（票据通常要留） | 同上 |
 | 减分：有人脸 | -0.25 | 同上 |
-| 文档（标签判定） | 人脸面积 ≥ 8% 或 ≥ 2 张脸 → 先判人物；否则需命中 `documentLabels` 且置信度 ≥ 0.5 | `ContentAnalyzer.category` |
+| 文档（标签判定） | 人像先抢走（人脸面积 ≥ 8% 或 ≥ 2 张脸）；剩下的必须命中 `documentLabels` 且置信度 ≥ 0.5 | `ContentAnalyzer.category` |
+| 人像 | 人脸面积 ≥ 8% 或 ≥ 2 张脸 → `faceCount ≥ 2` 判**合照**，否则**单人照**；场景标签命中 person/selfie 但一张脸都没检出，也算单人照（远景/背影） | `ContentAnalyzer.category` |
+| 人脸精细复核 | 内容识别收尾时，对人物类里「小图只数出 0~1 张脸」的照片重取 **512px** 再数一次；`faceCountFine ≥ 2` → 合照，否则单人照。结果写缓存，只在第一次跑 | `AnalysisEngine.refineFacesPass` |
+| 老缓存「人物」迁移 | `fromCache("人物")` → 单人照，再在 `apply(to:)` 里用缓存已有的 `faceCount`（或 `faceCountFine`）就地拆成合照 | `ContentCategory.fromCache` + `CachedPhoto.apply` |
 | 文档（关键词覆盖） | `docKeywords` 命中 **≥ 2 个** 且人脸面积 < 8% | `ContentAnalyzer.applyKeywords` |
 | 隐私闸门 | 肤色占比 > 0.10 **或** 人脸面积 > 5% **或** 有脸 → 才跑人体分割 | `AnalysisEngine.contentPass` |
 | 隐私闸门（1.5） | 肤色占比 > 0.10 **或** 人脸面积 > 5% **或** 有脸 → 才跑人体分割；视频走封面 + 条件补帧 | `AnalysisEngine.contentPass` |
@@ -96,10 +99,12 @@ Models/
 | 隐私分类显示开关 | `@AppStorage("showPrivacyCategory")`，默认 false。两个隐私类（照片/视频）一起受它控制 | `ContentView` 三处 |
 | 宠物 | 场景标签里有 dog/cat/pet/animal → 补跑 `VNRecognizeAnimalsRequest`，命中 Dog/Cat 且 conf ≥ 0.5 → 直接判宠物（排在美食/风景之前） | `ContentAnalyzer.detectAnimal` |
 | 发票二维码 | `scanQR` 扫到 `01` 开头的国标码（`parseInvoicePayload` 命中）→ 直接归「发票票据」，连读字都省 | `ContentAnalyzer.scanQR` |
-| 通用二维码 | `scanQR` 扫到非空 payload 但**不是**发票码，且当前分类是弱结论（截图/文档/其他，`isSoftCategory`）→ 归「二维码」。优先级：发票 > 二维码 > 截图 > 文档 | `ContentAnalyzer.scanQR` + `AnalysisEngine.contentPass` |
+| 通用二维码 | `scanQR` 扫到非空 payload 但**不是**发票码时**只记 `sawGenericQR`**，不改判、不返回；等 OCR 和大图路径全跑完，分类**仍是弱结论**才落地。优先级：发票 > 二维码 > 截图 > 文档 | `AnalysisEngine.contentPass` |
+| 截图专用 OCR 池 | 带码的截图走 300 次独立预算（只读一次字找发票关键词），不占文档类的 3000 次主预算——一万多张截图会把主预算吃光 | `AnalysisEngine.contentPass` |
 | 增量命中 | `localIdentifier` 相同 **且** `abs(modificationDate 差) ≤ 1s` | `ScanCache.hit` |
-| 结论强度 | **强结论**（发票/人物/美食/风景/宠物/隐私/隐私视频/视频）：新信号永不改判，缓存命中即用；**弱结论**（截图/文档/其他）：只是兜底，新信号来了要重判 | `ContentCategory.isSoftCategory` |
-| 信号版本补扫 | `CachedPhoto.signalVersion < ScanCache.currentSignalVersion` 且是弱结论 → `contentDone` 置回 false 重判。强结论与视频永不重判 | `CachedPhoto.needsContentRescan` |
+| 结论强度 | **强结论**（发票/单人照/合照/美食/风景/宠物/隐私/隐私视频/视频）：新信号永不改判，缓存命中即用；**弱结论**（截图/文档/其他/**二维码**）：只是兜底，新信号来了要重判。二维码属于弱结论——它的唯一证据是「扫到码」，能被「OCR 读出票面」推翻 | `ContentCategory.isSoftCategory` |
+| 信号版本补扫 | `CachedPhoto.signalVersion < ScanCache.currentSignalVersion` 且是弱结论 → `contentDone` 置回 false 重判。强结论与视频永不重判。当前 `currentSignalVersion = 2`（2 = 发票优先级修复，二维码转入弱结论） | `CachedPhoto.needsContentRescan` |
+| 列表排序 | 时间轴统一用 `fetchAssets` 的 `creationDate` 降序（源头就是 desc，下游不再排）。**例外**：大文件、分类 › 视频按 `fileSize` 降序；重复/相似组间按组内最新一张的时间 | `PhotoLibraryService.fetchAllAssets` / `AnalysisEngine.findExactGroups` |
 | 补扫进度 | 分母用「真正要跑的张数」（`pending`），不是全库；`pending < total` 时 phase 为「正在补扫分类」 | `AnalysisEngine.contentPass` |
 | 隐藏 | `PHAssetChangeRequest.isHidden = true`，进系统「已隐藏」相簿（iOS 16 起需 Face ID）。App 取图 `includeHiddenAssets = false`，所以隐藏后自动从 App 消失；找回走 `smartAlbumAllHidden` | `PhotoLibraryService.setHidden` / `fetchHiddenAssets` |
 
