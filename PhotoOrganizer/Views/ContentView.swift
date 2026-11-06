@@ -182,12 +182,19 @@ struct ContentView: View {
                     // 否则百分比从 100% 掉回 0% 会被当成卡死。
                     refine.isFaceRefine = text.contains("复核")
                 }
+            } onFaceRefined: { res in
+                // 人脸复核跑完的第二次回调：只换结果、关掉横幅。
+                guard scanID == myID else { return }
+                result = res
+                isRefining = false
+                refine.isFaceRefine = false
             } completion: { res in
                 guard scanID == myID else { return }
                 result = res
                 isRefining = false
                 refine.backfill = false
-                refine.isFaceRefine = false
+                // 这里**不能**清 isFaceRefine：复核可能紧接着就在跑，
+                // 清掉会让横幅消失、用户以为全部完成，可过几分钟数字还会跳一次。
             }
         }
     }
@@ -1008,7 +1015,7 @@ struct ResultView: View {
                 summaryItem(title: "截图", value: "\(shots.count)", color: Color(red: 0.4, green: 0.45, blue: 0.5))
             }
 
-            if isRefining {
+            if isRefining || refineStatus.isFaceRefine {
                 RefineBanner(status: refineStatus)
             }
 

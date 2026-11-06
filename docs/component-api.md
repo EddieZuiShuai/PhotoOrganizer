@@ -20,7 +20,7 @@
 | `contrastRange` | `Double` | 2%~98% 分位差，用于判断低细节 |
 | `isLowDetail` | `Bool` | 近黑/近白/纯色，不参与模糊判定 |
 | `fileSize` | `Int64` | 字节。`0` = 没取到，别拿它算"可释放空间" |
-| `category` / `contentTags` / `ocrHits` / `faceCount` | | 内容识别结果，阶段二才有 |
+| `category` / `contentTags` / `ocrHits` / `faceCount` / `faceCountFine` | | 内容识别结果，阶段二才有。`faceCount` 来自 320px 小图；`faceCountFine`（Optional）来自 512px 复核，nil = 还没复核 |
 | `brightness` / `edgeDensity` | `Double` | `brightness = -1` 表示未测 |
 | `cleanupScore` / `cleanupReasons` / `isFavorite` | | 建议分 0~1 + 理由列表 |
 
@@ -52,7 +52,7 @@
 
 | 类型 | 取值 | 用途 |
 |---|---|---|
-| `ContentCategory` | 发票票据 / **二维码** / 文档 / 截图 / 人物 / 美食 / 风景 / 宠物 / **隐私照片 / 隐私视频** / **视频** / 其他 | 带 `icon`（SF Symbols）、`isPrivacy`（两个隐私类都算，**别再写 `== .privacy`**）、`isSoftCategory`（软结论：截图/文档/其他，新信号可以推翻，`isQRWeakCategory` 是它的别名）、`isVideo` 类目只按素材类型落桶。`fromCache(_:)` 认 1.4 的旧名「隐私」 |
+| `ContentCategory` | 发票票据 / **二维码** / 文档 / 截图 / **单人照 / 合照** / 美食 / 风景 / 宠物 / **隐私照片 / 隐私视频** / **视频** / 其他 | 带 `icon`（SF Symbols）、`isPrivacy`（两个隐私类都算，**别再写 `== .privacy`**）、`isSoftCategory`（软结论：截图/文档/其他/**二维码**，新信号可以推翻）、`isVideo` 类目只按素材类型落桶。`fromCache(_:)` 认 1.4 的旧名「隐私」和 1.5(24) 的旧名「人物」（后者先落单人照，`apply(to:)` 再用 `faceCount` 拆开） |
 | `ResultTab` | suggested / duplicate / similar / blurry / large / content(ContentCategory) | 结果页标签，带 `title` / `icon` |
 | `LayoutMode` | list(1) / two(2) / three(3) | 列数，`rawValue` 直接当列数 |
 | `AppPhase` | idle / scanning / done | 主容器状态 |

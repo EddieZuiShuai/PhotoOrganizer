@@ -42,6 +42,12 @@ final class AnalysisEngine {
         progress: @escaping (_ processed: Int, _ total: Int, _ phase: String) -> Void,
         onQuickResult: ((AnalysisResult) -> Void)? = nil,
         refineProgress: ((_ processed: Int, _ total: Int, _ phase: String) -> Void)? = nil,
+        /// 人脸复核跑完后的第二次回调。
+        ///
+        /// 为什么是两次而不是一次：复核要几分钟，而分类页在那之前就应该能看。
+        /// 先按 320px 的结论出结果（`completion`），复核完再用这个回调把数字刷新一遍——
+        /// 和「清理建议先出、内容分类后台补」是同一个思路，不让用户对着空页面等。
+        onFaceRefined: ((AnalysisResult) -> Void)? = nil,
         completion: @escaping (AnalysisResult) -> Void
     ) {
         DispatchQueue.global(qos: .userInitiated).async {
@@ -75,24 +81,38 @@ final class AnalysisEngine {
             items = refined
             let tContent = CFAbsoluteTimeGetCurrent() - tContentStart
 
-            // ---------- 阶段 3.5：人脸精细复核 ----------
-            // 只跑人物类（几千张，几分钟）。放在 assemble 之前，分类结果一次到位；
-            // 清理建议在阶段 2 就已经出去了，用户不用等这一轮才能动手。
+            // ---------- 阶段 4：先出结果 ----------
+            // 人脸此时还是 320px 的结论，可能漏掉远景合影。先把分类放出来，
+            // 用户能立刻开始用；复核完再由 onFaceRefined 把数字刷一遍。
+            let final = self.assemble(items: items, grouped: grouped, contentReady: true)
+
+            NSLog("[PhotoOrganizer][Scan] 阶段二 内容识别 %.1fs｜全流程 %.1fs",
+                  tContent, CFAbsoluteTimeGetCurrent() - tStart)
+
+            // 先完成这一轮，人脸复核不挡分类页
+            DispatchQueue.main.async {
+                completion(final)
+            }
+
+            guard let onFaceRefined = onFaceRefined else {
+                ScanCache.shared.logStats()
+                return
+            }
+
+            // ---------- 阶段 5：人脸精细复核 ----------
+            // 只跑人物类（几千张）。放在 completion 之后，所以它再慢也不挡分类页。
             let tFaceStart = CFAbsoluteTimeGetCurrent()
-            items = DispatchQueue.global(qos: .utility).sync { () -> [PhotoItem] in
+            let faceRefined = DispatchQueue.global(qos: .utility).sync { () -> [PhotoItem] in
                 self.refineFacesPass(items, assets: assets, progress: refineProgress)
             }
             let tFace = CFAbsoluteTimeGetCurrent() - tFaceStart
 
-            // ---------- 阶段 4：内容信号回填后重算 ----------
-            let final = self.assemble(items: items, grouped: grouped, contentReady: true)
-
-            NSLog("[PhotoOrganizer][Scan] 阶段二 内容识别 %.1fs + 人脸复核 %.1fs｜全流程 %.1fs",
-                  tContent, tFace, CFAbsoluteTimeGetCurrent() - tStart)
+            let finalFace = self.assemble(items: faceRefined, grouped: grouped, contentReady: true)
+            NSLog("[PhotoOrganizer][Scan] 人脸复核 %.1fs", tFace)
             ScanCache.shared.logStats()
 
             DispatchQueue.main.async {
-                completion(final)
+                onFaceRefined(finalFace)
             }
         }
     }
