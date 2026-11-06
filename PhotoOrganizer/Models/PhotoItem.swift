@@ -13,6 +13,9 @@ enum ContentCategory: String, CaseIterable, Identifiable {
     case pet = "宠物"
     case privacy = "隐私照片"
     case privacyVideo = "隐私视频"
+    /// 按素材类型落桶，不是内容判断：所有没被判成隐私视频的视频都在这里。
+    /// 放到「其他」前面，是因为用户找视频时是「我要挑大视频」，不是「我要看其他」。
+    case video = "视频"
     case other = "其他"
 
     var id: String { rawValue }
@@ -29,6 +32,7 @@ enum ContentCategory: String, CaseIterable, Identifiable {
         case .pet: return "pawprint.fill"
         case .privacy: return "eye.slash.fill"
         case .privacyVideo: return "video.slash.fill"
+        case .video: return "video.fill"
         case .other: return "square.grid.2x2"
         }
     }
@@ -41,10 +45,20 @@ enum ContentCategory: String, CaseIterable, Identifiable {
         self == .privacy || self == .privacyVideo
     }
 
-    /// 非发票二维码只在「还没被更强信号认领」时才算二维码——
-    /// 人物 / 美食 / 风景 / 宠物这类已经拿到的强结论，不该被一枚码推翻。
-    /// 二维码只覆盖「截图 / 文档 / 其他」这种弱分类。
-    var isQRWeakCategory: Bool {
+    /// 弱分类只覆盖「截图 / 文档 / 其他」这类**没有强结论**的桶。
+    var isQRWeakCategory: Bool { isSoftCategory }
+
+    /// 结论的强度：新信号（二维码、以后的聊天截图/手写笔记…）能不能推翻它。
+    ///
+    /// 这条区分是增量扫描能一直正确下去的前提：
+    /// - **强结论**（发票 / 人物 / 美食 / 风景 / 宠物 / 隐私 / 视频）：新信号一律不许改判，
+    ///   所以缓存命中就直接用，不用重扫。
+    /// - **弱结论**（截图 / 文档 / 其他）：只是「没被更强信号认领」的兜底，
+    ///   加了新信号就得重判一遍，否则升级后新分类永远是 0。
+    ///
+    /// 代价只有弱结论那一批要重跑，强结论两万条照常命中——这是和「整份缓存作废」
+    /// 最大的区别，也是 `ScanCache.currentSignalVersion` 存在的理由。
+    var isSoftCategory: Bool {
         switch self {
         case .screenshot, .document, .other: return true
         default: return false

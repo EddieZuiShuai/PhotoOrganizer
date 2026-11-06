@@ -19,6 +19,10 @@ final class RefineStatus: ObservableObject {
     @Published var done: Int = 0
     @Published var total: Int = 0
     @Published var phaseText: String = ""
+    /// 这一轮是在「补扫」而不是首次识别：只有弱结论（截图/文档/其他）重判。
+    /// 分类卡要靠它决定显示「补扫中 62%」还是「0」——两者长得一样的话，
+    /// 用户只能靠猜，猜完就跑去清缓存重扫（1.5(23) 的真实反馈）。
+    @Published var backfill: Bool = false
 
     var percent: Int {
         guard total > 0 else { return 0 }
@@ -113,6 +117,7 @@ struct ContentView: View {
         phase = .idle
         isRefining = false
         refine.reset(to: 0)
+        refine.backfill = false
         progressValue = 0
         progressText = ""
         processed = 0
@@ -168,11 +173,13 @@ struct ContentView: View {
                     refine.done = done
                     refine.total = all
                     refine.phaseText = text
+                    refine.backfill = text.contains("补扫")
                 }
             } completion: { res in
                 guard scanID == myID else { return }
                 result = res
                 isRefining = false
+                refine.backfill = false
             }
         }
     }
@@ -555,6 +562,9 @@ struct ResultView: View {
     /// 已删的照片。提到 MainTabView 里是因为「空间」tab 也要读它算释放量；
     /// 放在这里的话，切一次 tab 就丢了。
     @Binding var deletedIDs: Set<String>
+    /// 刚被隐藏的条目。和 deletedIDs 分开：隐藏不释放空间，不能算进「已释放」。
+    @Binding var hiddenIDs: Set<String>
+
     /// 从「分类」tab 点某张卡片跳过来时，指定要打开哪个标签。
     @Binding var requestedTab: ResultTab?
 
@@ -580,6 +590,8 @@ struct ResultView: View {
     /// 起因：建议清理页右上角点一下「全选 2779」，底部按钮立刻变成「删除 2779 张」，
     /// 中间没有任何缓冲；而建议里本来就混着误判，点错的代价太大。
     @State private var bulkConfirm: BulkConfirm?
+    /// 隐私页签里点「隐藏」的二次确认。隐藏会让人找不着照片，值得多问一句。
+    @State private var confirmHide = false
     /// 超过这个数量才拦。几十张的批量操作不值得多弹一次框。
     private let bulkConfirmThreshold = 500
 
@@ -625,6 +637,7 @@ struct ResultView: View {
         isRefining: Bool = false,
         refineStatus: RefineStatus = RefineStatus(),
         deletedIDs: Binding<Set<String>>,
+        hiddenIDs: Binding<Set<String>>,
         requestedTab: Binding<ResultTab?>,
         onRestart: @escaping () -> Void
     ) {
@@ -633,6 +646,7 @@ struct ResultView: View {
         self.refineStatus = refineStatus
         self.onRestart = onRestart
         self._deletedIDs = deletedIDs
+        self._hiddenIDs = hiddenIDs
         self._requestedTab = requestedTab
         var map: [String: PhotoItem] = [:]
         map.reserveCapacity(result.items.count)
@@ -711,6 +725,12 @@ struct ResultView: View {
         } message: {
             Text(message ?? "")
         }
+        .alert("隐藏这 \(selectedIDs.count) 项？", isPresented: $confirmHide) {
+            Button("取消", role: .cancel) {}
+            Button("隐藏") { hideSelected() }
+        } message: {
+            Text("它们会被移到系统「已隐藏」相簿，并从本 App 里消失。iOS 16 起打开那个相簿需要 Face ID。想找回：我的 › 已隐藏的照片。")
+        }
         .confirmationDialog(
             "压缩这段视频？",
             isPresented: Binding(
@@ -751,7 +771,7 @@ struct ResultView: View {
                 onFinish: { marks in
                     guard !marks.isEmpty else { return }
                     selectedIDs.formUnion(marks)
-                    showToast("已标记 \(marks.count) 张，点下面红色按钮统一删除")
+                    showToast("已标 \(marks.count) 张待删，点下面红色按钮统一删除")
                 },
                 onDeleteMany: { items in
                     // 逐张过里点「删除 N 张」= 批量真删。这里只负责落到相册，
@@ -861,7 +881,9 @@ struct ResultView: View {
     }
 
     private func contentItems(_ category: ContentCategory) -> [PhotoItem] {
-        (result.categoryBuckets[category] ?? []).filter { !deletedIDs.contains($0.id) && passes($0) }
+        (result.categoryBuckets[category] ?? []).filter {
+            !deletedIDs.contains($0.id) && !hiddenIDs.contains($0.id) && passes($0)
+        }
     }
 
     /// 大文件：优先 ≥10MB，按体积从大到小；都不够 10MB 时至少给出前 60 个
@@ -1778,6 +1800,13 @@ struct ResultView: View {
 
     // MARK: 底部操作栏
 
+    /// 当前页签是不是隐私类。只有它才给「隐藏」按钮——
+    /// 普通分类里那颗按钮没有意义，只会增加误触。
+    private var isPrivacyTab: Bool {
+        if case .content(let c) = tab { return c.isPrivacy }
+        return false
+    }
+
     private var bottomArea: some View {
         // toast 用 overlay 挂在按钮区顶部，而不是和按钮一起排进 safeAreaInset：
         // safeAreaInset 是布局的一部分，toast 一出现一消失会把整页内容顶得上下跳。
@@ -1812,13 +1841,14 @@ struct ResultView: View {
                 }
                 .padding(16)
             } else {
-                HStack(spacing: 12) {
+                HStack(spacing: 10) {
                     Button {
                         selectedIDs.removeAll()
                     } label: {
                         // 只写「取消」两个字，用户会分不清「取消本次操作」还是「取消这些选中」。
                         // 把数量写进去，按钮自己就说明了会发生什么。
-                        Text("取消选中 \(selectedIDs.count) 张")
+                        // 隐私页签多一颗「隐藏」，横排放不下三段长文案，这里缩成「取消」。
+                        Text(isPrivacyTab ? "取消" : "取消选中 \(selectedIDs.count) 张")
                             .font(.system(size: 15))
                             .foregroundColor(.primary)
                             .frame(maxWidth: .infinity)
@@ -1828,6 +1858,21 @@ struct ResultView: View {
                     }
                     // 文案会变（带数量），测试不能按文字点。给一个稳定标识，改文案不牵连用例。
                     .accessibilityIdentifier("action-clear-selection")
+
+                    if isPrivacyTab {
+                        Button {
+                            confirmHide = true
+                        } label: {
+                            Text("隐藏 \(selectedIDs.count)")
+                                .font(.system(size: 15, weight: .medium))
+                                .foregroundColor(.primary)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 13)
+                                .background(Color.black.opacity(0.08))
+                                .cornerRadius(10)
+                        }
+                        .accessibilityIdentifier("action-hide-selected")
+                    }
 
                     Button {
                         performDelete()
@@ -1917,9 +1962,25 @@ struct ResultView: View {
         reallyDelete()
     }
 
+    /// 隐藏选中的隐私条目。隐藏 ≠ 删除：照片还在相册里，只是进了系统「已隐藏」。
+    private func hideSelected() {
+        let chosen = selectedIDs.compactMap { itemIndex[$0] }
+        guard !chosen.isEmpty else { return }
+        PhotoLibraryService.shared.setHidden(true, assets: chosen.map { $0.asset }) { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    hiddenIDs.formUnion(chosen.map { $0.id })
+                    selectedIDs.subtract(Set(chosen.map { $0.id }))
+                    showToast("已隐藏 \(chosen.count) 张 · 在「我的 › 已隐藏的照片」里可找回")
+                } else {
+                    message = "隐藏失败：" + (error?.localizedDescription ?? "未知原因")
+                }
+            }
+        }
+    }
+
     /// 真正执行删除（二次确认之后走这里）
-    private func reallyDelete() {
-        var chosen: [PhotoItem] = []
+    private func reallyDelete() {        var chosen: [PhotoItem] = []
         for id in selectedIDs {
             if let item = itemIndex[id] {
                 chosen.append(item)
@@ -2065,12 +2126,14 @@ struct RefineBanner: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(status.total > 0
-                     ? "正在识别分类 \(status.percent)%（\(status.done)/\(status.total)）"
-                     : "正在识别分类…")
+                     ? "\(status.backfill ? "正在补扫分类" : "正在识别分类") \(status.percent)%（\(status.done)/\(status.total)）"
+                     : (status.backfill ? "正在补扫分类…" : "正在识别分类…"))
                     .font(.system(size: 11, weight: .medium))
                     .foregroundColor(.primary)
 
-                Text("重复、相似、模糊已经算完，可以先动手；识别完会自动补上内容分类")
+                Text(status.backfill
+                     ? "新版本多了识别信号，只重判截图/文档/其他；其余分类不受影响"
+                     : "重复、相似、模糊已经算完，可以先动手；识别完会自动补上内容分类")
                     .font(.system(size: 10))
                     .foregroundColor(.secondary)
                     .lineLimit(2)
@@ -2350,6 +2413,9 @@ struct MainTabView: View {
 
     @State private var tab: MainTab = .clean
     @State private var deletedIDs: Set<String> = []
+    /// 刚被「隐藏」的照片。和 `deletedIDs` 分开记：
+    /// 隐藏不释放空间，混进已删除集合会让空间页的「已释放」虚高。
+    @State private var hiddenIDs: Set<String> = []
     @State private var requestedTab: ResultTab?
 
     var body: some View {
@@ -2359,6 +2425,7 @@ struct MainTabView: View {
                 isRefining: isRefining,
                 refineStatus: refineStatus,
                 deletedIDs: $deletedIDs,
+                hiddenIDs: $hiddenIDs,
                 requestedTab: $requestedTab,
                 onRestart: onRestart
             )
@@ -2366,7 +2433,7 @@ struct MainTabView: View {
             .allowsHitTesting(tab == .clean)
             .accessibilityHidden(tab != .clean)
 
-            CategoryOverviewView(result: result, deletedIDs: $deletedIDs)
+            CategoryOverviewView(result: result, refineStatus: refineStatus, deletedIDs: $deletedIDs, hiddenIDs: $hiddenIDs)
                 .opacity(tab == .categories ? 1 : 0)
                 .allowsHitTesting(tab == .categories)
                 .accessibilityHidden(tab != .categories)
@@ -2450,7 +2517,11 @@ struct MainTabBar: View {
 
 struct CategoryOverviewView: View {
     let result: AnalysisResult
+    /// 用 @ObservedObject 而不是 let：补扫时百分比每变一次都要重画卡片。
+    /// 传 let 进来只会拿到进页面那一刻的快照，卡片上的数字永远停在 0%。
+    @ObservedObject var refineStatus: RefineStatus
     @Binding var deletedIDs: Set<String>
+    @Binding var hiddenIDs: Set<String>
 
     /// 和「清理」页读同一个键：这边关掉，那边的两个隐私页签也一起消失
     @AppStorage("showPrivacyCategory") private var showPrivacyCategory: Bool = false
@@ -2477,7 +2548,8 @@ struct CategoryOverviewView: View {
                                 categoryCard(
                                     category,
                                     count: items.count,
-                                    bytes: items.reduce(Int64(0)) { $0 + max(0, $1.fileSize) }
+                                    bytes: items.reduce(Int64(0)) { $0 + max(0, $1.fileSize) },
+                                    refilling: refineStatus.backfill && category.isSoftCategory
                                 )
                             }
                             .buttonStyle(.plain)
@@ -2496,30 +2568,36 @@ struct CategoryOverviewView: View {
                 CategoryDetailView(
                     category: category,
                     items: result.categoryBuckets[category] ?? [],
-                    deletedIDs: $deletedIDs
+                    deletedIDs: $deletedIDs,
+                    hiddenIDs: $hiddenIDs
                 )
             }
         }
     }
 
     private func alive(_ category: ContentCategory) -> [PhotoItem] {
-        (result.categoryBuckets[category] ?? []).filter { !deletedIDs.contains($0.id) }
+        (result.categoryBuckets[category] ?? []).filter {
+            !deletedIDs.contains($0.id) && !hiddenIDs.contains($0.id)
+        }
     }
 
-    private func categoryCard(_ category: ContentCategory, count: Int, bytes: Int64) -> some View {
+    private func categoryCard(_ category: ContentCategory, count: Int, bytes: Int64, refilling: Bool) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
                 Image(systemName: category.icon)
                     .font(.system(size: 16, weight: .medium))
                     .foregroundColor(color(for: category))
                 Spacer()
-                Text("\(count)")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundColor(count == 0 ? Color.secondary.opacity(0.5) : .primary)
+                // 补扫中就把数字换成百分比：这一类的旧结论正在被推翻重判，
+                // 此时显示「0」是在撒谎——不是没有，是还没算完。
+                Text(refilling ? "\(refineStatus.percent)%" : "\(count)")
+                    .font(.system(size: refilling ? 17 : 22, weight: .semibold))
+                    .foregroundColor(refilling ? color(for: category)
+                                     : (count == 0 ? Color.secondary.opacity(0.5) : .primary))
             }
             Text(category.rawValue)
                 .font(.system(size: 14, weight: .medium))
-            Text(count == 0 ? "暂无" : byteText(bytes))
+            Text(refilling ? "补扫中…" : (count == 0 ? "暂无" : byteText(bytes)))
                 .font(.system(size: 11))
                 .foregroundColor(.secondary)
         }
@@ -2541,6 +2619,7 @@ struct CategoryOverviewView: View {
         case .pet: return Color(red: 0.55, green: 0.42, blue: 0.3)
         case .privacy: return Color(red: 0.6, green: 0.35, blue: 0.6)
         case .privacyVideo: return Color(red: 0.45, green: 0.35, blue: 0.62)
+        case .video: return Color(red: 0.25, green: 0.42, blue: 0.68)
         case .other: return Color(red: 0.5, green: 0.5, blue: 0.55)
         }
     }
@@ -2554,10 +2633,34 @@ struct CategoryOverviewView: View {
 /// - sheet 是「临时任务」，看完要关掉；用户在这里是**浏览一整类**，需要能往下滚很久；
 /// - 独立 tab 会让底部变成 5 项，而这一页在语义上就是「分类」的子页，不是平级栏目。
 /// 每个 tab 一个导航栈，是 iOS 从 iPhone OS 1.0 就在用的模型，返回永远回到卡片墙。
+/// 视频详情页的体积筛选。
+///
+/// 为什么不把「大视频 / 小视频」拆成两张分类卡：那样一个视频既是「大视频」
+/// 又是「视频」，互斥性就破了，后面的统计全乱。体积是类内的属性，不是分类。
+enum VideoSizeFilter: String, CaseIterable, Identifiable {
+    case all = "全部"
+    case large = "≥100MB"
+    case small = "<100MB"
+
+    var id: String { rawValue }
+
+    func matches(_ bytes: Int64) -> Bool {
+        let mb: Int64 = 1024 * 1024
+        switch self {
+        case .all: return true
+        case .large: return bytes >= 100 * mb
+        case .small: return bytes < 100 * mb
+        }
+    }
+}
+
 struct CategoryDetailView: View {
     let category: ContentCategory
     let items: [PhotoItem]
     @Binding var deletedIDs: Set<String>
+    /// 这次运行里刚被「隐藏」的 id。隐藏不是删除，所以不能混进 `deletedIDs`
+    /// （那个集合会被空间页算成已释放空间），但界面上要从列表里消失。
+    @Binding var hiddenIDs: Set<String>
 
     @AppStorage("blurPrivacyThumbnails") private var blurPrivacyThumbnails: Bool = true
 
@@ -2565,6 +2668,8 @@ struct CategoryDetailView: View {
     @State private var previewTarget: PreviewTarget?
     @State private var message: String?
     @State private var toast: String?
+    @State private var videoFilter: VideoSizeFilter = .all
+    @State private var confirmHide = false
 
     private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
 
@@ -2579,7 +2684,12 @@ struct CategoryDetailView: View {
     }
 
     private var alive: [PhotoItem] {
-        items.filter { !deletedIDs.contains($0.id) }
+        var base = items.filter { !deletedIDs.contains($0.id) && !hiddenIDs.contains($0.id) }
+        guard category == .video else { return base }
+        base = base.filter { videoFilter.matches(max(0, $0.fileSize)) }
+        // 「挑大视频」是这一页唯一的目的，默认就该大的在前，
+        // 而不是按相册时间轴让人翻半天。
+        return base.sorted { max(0, $0.fileSize) > max(0, $1.fileSize) }
     }
 
     var body: some View {
@@ -2596,8 +2706,26 @@ struct CategoryDetailView: View {
                         .cornerRadius(10)
                 }
 
+                if category == .video && !items.isEmpty {
+                    Picker("体积", selection: $videoFilter) {
+                        ForEach(VideoSizeFilter.allCases) { filter in
+                            Text(filter.rawValue).tag(filter)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .accessibilityIdentifier("video-size-filter")
+
+                    Text("\(alive.count) 段 · \(byteText(alive.reduce(Int64(0)) { $0 + max(0, $1.fileSize) })) · 按体积从大到小")
+                        .font(.system(size: 11.5))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 2)
+                }
+
                 if alive.isEmpty {
-                    Text("这一类里没有内容了")
+                    Text(category == .video && videoFilter != .all
+                         ? "这个体积区间里没有视频，换个筛选看看"
+                         : "这一类里没有内容了")
                         .font(.system(size: 13))
                         .foregroundColor(.secondary)
                         .frame(maxWidth: .infinity)
@@ -2655,6 +2783,12 @@ struct CategoryDetailView: View {
                     .allowsHitTesting(false)
             }
         }
+        .alert("隐藏这 \(selected.count) 项？", isPresented: $confirmHide) {
+            Button("取消", role: .cancel) {}
+            Button("隐藏") { hideSelected() }
+        } message: {
+            Text("它们会被移到系统「已隐藏」相簿，并从本 App 里消失。iOS 16 起打开那个相簿需要 Face ID。想找回：我的 › 已隐藏的照片。")
+        }
         .alert("出错了", isPresented: Binding(
             get: { message != nil },
             set: { if !$0 { message = nil } }
@@ -2682,17 +2816,35 @@ struct CategoryDetailView: View {
     }
 
     private var deleteBar: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             Button {
                 selected.removeAll()
             } label: {
-                Text("取消选中 \(selected.count) 项")
+                Text("取消选中")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundColor(.secondary)
             }
             .buttonStyle(.plain)
 
-            Spacer()
+            Spacer(minLength: 4)
+
+            // 隐藏只对隐私组出现：这里误点一次就是把照片从 App 里「弄丢」，
+            // 普通分类里放这颗按钮没有意义，只会增加误触。
+            if category.isPrivacy {
+                Button {
+                    confirmHide = true
+                } label: {
+                    Text("隐藏 \(selected.count)")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(Color.black.opacity(0.06))
+                        .cornerRadius(9)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("category-hide")
+            }
 
             Button {
                 let chosen = alive.filter { selected.contains($0.id) }
@@ -2701,7 +2853,7 @@ struct CategoryDetailView: View {
                 Text("删除 \(selected.count) 项")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundColor(.white)
-                    .padding(.horizontal, 18)
+                    .padding(.horizontal, 14)
                     .padding(.vertical, 10)
                     .background(Color(red: 0.85, green: 0.25, blue: 0.2))
                     .cornerRadius(10)
@@ -2751,6 +2903,25 @@ struct CategoryDetailView: View {
         }
     }
 
+    /// 隐藏 ≠ 删除：照片还在相册里，只是进了系统「已隐藏」相簿。
+    /// 所以这里记进 `hiddenIDs` 而不是 `deletedIDs`——后者会被「空间」页
+    /// 当成已释放的空间算进去，那是在骗人。
+    private func hideSelected() {
+        let chosen = alive.filter { selected.contains($0.id) }
+        guard !chosen.isEmpty else { return }
+        PhotoLibraryService.shared.setHidden(true, assets: chosen.map { $0.asset }) { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    hiddenIDs.formUnion(chosen.map { $0.id })
+                    selected.subtract(Set(chosen.map { $0.id }))
+                    showToast("已隐藏 \(chosen.count) 项 · 在「我的 › 已隐藏的照片」里可找回")
+                } else {
+                    message = "隐藏失败：" + (error?.localizedDescription ?? "未知原因")
+                }
+            }
+        }
+    }
+
     private func showToast(_ text: String) {
         toast = text
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
@@ -2777,6 +2948,7 @@ struct SettingsTabView: View {
     @State private var confirmClearCache = false
     @State private var toast: String?
     @State private var showTutorial = false
+    @State private var showHidden = false
 
     private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
 
@@ -2808,6 +2980,35 @@ struct SettingsTabView: View {
                     )
                     .disabled(!showPrivacyCategory)
                     .opacity(showPrivacyCategory ? 1 : 0.4)
+
+                    divider
+
+                    // 隐藏只对隐私组开放，但「找回」必须全局可达：
+                    // 万一误点，用户得有个地方把照片捞回来，否则等于永久弄丢。
+                    Button {
+                        showHidden = true
+                    } label: {
+                        HStack(alignment: .top) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("已隐藏的照片")
+                                    .font(.system(size: 15))
+                                    .foregroundColor(.primary)
+                                Text("在隐私组点过「隐藏」的条目都在这里，可以取消隐藏")
+                                    .font(.system(size: 11.5))
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer(minLength: 6)
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .padding(.top, 3)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 12)
+                    .accessibilityIdentifier("settings-hidden")
                 }
 
                 // MARK: 数据与存储
@@ -2978,6 +3179,9 @@ struct SettingsTabView: View {
         .sheet(isPresented: $showTutorial) {
             TutorialView(hasScanned: photoCount > 0)
         }
+        .sheet(isPresented: $showHidden) {
+            HiddenAssetsView()
+        }
         .onChange(of: scenePhase) { phase in
             // 从系统设置改完权限回来，数字要跟着变
             if phase == .active { refresh() }
@@ -3131,6 +3335,234 @@ struct SettingsTabView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
             withAnimation(.easeIn(duration: 0.2)) {
                 if toast == text { toast = nil }
+            }
+        }
+    }
+}
+
+// MARK: - 已隐藏的照片（找回通道）
+
+/// 系统「已隐藏」相簿的只读列表 + 取消隐藏。
+///
+/// 这个页面存在的唯一理由：隐藏按钮一旦误点，照片就从 App 里消失了。
+/// 没有这个入口，用户唯一的办法是去系统相册翻「已隐藏」再一张张取消，
+/// 而那个相簿本身还要 Face ID。给一条看得见的路，比事后解释有用。
+struct HiddenAssetsView: View {
+    @Environment(\.dismiss) private var dismiss
+
+    @State private var assets: [PHAsset] = []
+    @State private var selected: Set<String> = []
+    @State private var busy = false
+    @State private var message: String?
+
+    private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
+    private var side: CGFloat { max(72, (UIScreen.main.bounds.width - 24 - 12) / 3) }
+
+    private var columns: [GridItem] {
+        Array(repeating: GridItem(.fixed(side), spacing: 6), count: 3)
+    }
+
+    var body: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 10) {
+                    if assets.isEmpty {
+                        emptyState
+                    } else {
+                        Text("系统「已隐藏」相簿里共 \(assets.count) 项。取消隐藏后会回到系统相册，重新扫描一次就会重新出现在分类里。")
+                            .font(.system(size: 11.5))
+                            .foregroundColor(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+
+                        LazyVGrid(columns: columns, spacing: 6) {
+                            ForEach(assets, id: \.localIdentifier) { asset in
+                                Button {
+                                    toggle(asset.localIdentifier)
+                                } label: {
+                                    HiddenThumb(
+                                        asset: asset,
+                                        side: side,
+                                        selected: selected.contains(asset.localIdentifier)
+                                    )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+            }
+            .background(Color(red: 0.96, green: 0.96, blue: 0.97))
+            .navigationTitle("已隐藏的照片")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarLeading) {
+                    Button("关闭") { dismiss() }
+                        .font(.system(size: 14))
+                }
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button(selected.count == assets.count && !assets.isEmpty ? "取消全选" : "全选") {
+                        if selected.count == assets.count && !assets.isEmpty {
+                            selected.removeAll()
+                        } else {
+                            selected = Set(assets.map { $0.localIdentifier })
+                        }
+                    }
+                    .font(.system(size: 14))
+                    .disabled(assets.isEmpty)
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                if !selected.isEmpty { unhideBar }
+            }
+            .alert("出错了", isPresented: Binding(
+                get: { message != nil },
+                set: { if !$0 { message = nil } }
+            )) {
+                Button("知道了", role: .cancel) { message = nil }
+            } message: {
+                Text(message ?? "")
+            }
+        }
+        .onAppear(perform: reload)
+    }
+
+    private var emptyState: some View {
+        VStack(spacing: 8) {
+            Image(systemName: "eye.slash")
+                .font(.system(size: 30))
+                .foregroundColor(.secondary.opacity(0.55))
+            Text("没有已隐藏的照片")
+                .font(.system(size: 15, weight: .medium))
+            Text("在隐私组选中照片后点「隐藏」，它们会出现在这里。")
+                .font(.system(size: 12))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.top, 60)
+    }
+
+    private var unhideBar: some View {
+        HStack(spacing: 10) {
+            Button {
+                selected.removeAll()
+            } label: {
+                Text("取消选中")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.secondary)
+            }
+            .buttonStyle(.plain)
+
+            Spacer()
+
+            Button {
+                unhide()
+            } label: {
+                Text(busy ? "处理中…" : "取消隐藏 \(selected.count) 项")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(blue.opacity(busy ? 0.5 : 1))
+                    .cornerRadius(10)
+            }
+            .buttonStyle(.plain)
+            .disabled(busy)
+            .accessibilityIdentifier("hidden-unhide")
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+        .background(
+            Color.white
+                .overlay(alignment: .top) {
+                    Rectangle().fill(Color.black.opacity(0.07)).frame(height: 0.5)
+                }
+                .ignoresSafeArea(edges: .bottom)
+        )
+    }
+
+    private func toggle(_ id: String) {
+        if selected.contains(id) { selected.remove(id) } else { selected.insert(id) }
+    }
+
+    private func reload() {
+        assets = PhotoLibraryService.shared.fetchHiddenAssets()
+        selected = selected.intersection(Set(assets.map { $0.localIdentifier }))
+    }
+
+    private func unhide() {
+        let chosen = assets.filter { selected.contains($0.localIdentifier) }
+        guard !chosen.isEmpty, !busy else { return }
+        busy = true
+        PhotoLibraryService.shared.setHidden(false, assets: chosen) { success, error in
+            DispatchQueue.main.async {
+                busy = false
+                if success {
+                    let ids = Set(chosen.map { $0.localIdentifier })
+                    assets.removeAll { ids.contains($0.localIdentifier) }
+                    selected.removeAll()
+                } else {
+                    message = "取消隐藏失败：" + (error?.localizedDescription ?? "未知原因")
+                }
+            }
+        }
+    }
+}
+
+private struct HiddenThumb: View {
+    let asset: PHAsset
+    let side: CGFloat
+    let selected: Bool
+
+    @State private var image: UIImage?
+
+    var body: some View {
+        ZStack(alignment: .topTrailing) {
+            Group {
+                if let image = image {
+                    Image(uiImage: image)
+                        .resizable()
+                        .scaledToFill()
+                } else {
+                    Color(white: 0.9)
+                }
+            }
+            .frame(width: side, height: side)
+            .clipped()
+
+            if asset.mediaType == .video {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 9))
+                    .foregroundColor(.white)
+                    .padding(3)
+                    .background(Circle().fill(Color.black.opacity(0.45)))
+                    .padding(5)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+            }
+
+            if selected {
+                ZStack {
+                    Circle().fill(Color(red: 0, green: 0.48, blue: 1))
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 11, weight: .bold))
+                        .foregroundColor(.white)
+                }
+                .frame(width: 20, height: 20)
+                .padding(5)
+            }
+        }
+        .frame(width: side, height: side)
+        .cornerRadius(8)
+        .onAppear {
+            guard image == nil else { return }
+            PhotoLibraryService.shared.loadImage(
+                for: asset,
+                targetSize: CGSize(width: side * 2, height: side * 2)
+            ) { img in
+                guard let img = img else { return }
+                DispatchQueue.main.async { image = img }
             }
         }
     }

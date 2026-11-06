@@ -139,6 +139,12 @@ final class AnalysisEngine {
                     )
                     item.isFavorite = asset.isFavorite
                     cached.apply(to: &item)
+                    // 弱结论 + 信号版本落后 → 放回「未识别」，交给 contentPass 重判。
+                    // 注意不要在这里改缓存：重判没跑完就被杀的话，下次还得再来一遍，
+                    // 而缓存里 contentDone 仍是 true，正好承担这个「没扫完」的标记。
+                    if cached.needsContentRescan {
+                        item.contentDone = false
+                    }
                     items.append(item)
                     cacheHits += 1
                     return
@@ -308,10 +314,13 @@ final class AnalysisEngine {
             var buckets: [ContentCategory: [PhotoItem]] = [:]
             for item in scored {
                 if item.isVideo {
-                    // 视频只认隐私这一类。其余分类（发票 / 文档 / 截图）对视频没有意义，
-                    // 放进去只会让「其他」变成一堆视频。
+                    // 视频不进内容分类（发票 / 文档 / 截图对视频没有意义），
+                    // 但必须有个桶装着它——否则「分类」tab 声称覆盖全部素材，
+                    // 实际却少了五百多个视频。隐私视频仍然是独立的一类。
                     if item.category == .privacyVideo {
                         buckets[.privacyVideo, default: []].append(item)
+                    } else {
+                        buckets[.video, default: []].append(item)
                     }
                     continue
                 }
@@ -369,6 +378,17 @@ final class AnalysisEngine {
         var out = items
         let total = min(out.count, assets.count)
 
+        // 真正要跑的张数。首次扫描 = 全部；升级补扫 = 只有弱结论那一批。
+        // 进度用它当分母：补扫一万条却按两万条算的话，界面从 50% 开始往上爬，
+        // 用户会以为卡住了。
+        var pending = 0
+        for i in 0..<total where !out[i].contentDone { pending += 1 }
+        let isBackfill = pending > 0 && pending < total
+        let phaseText = isBackfill ? "正在补扫分类" : "正在识别内容分类"
+        var pendingDone = 0
+        var lastReported = 0
+        progress?(0, pending, phaseText)
+
         // OCR 整库给一个总预算，用完就只分类、不读字
         let ocrBudget = 3000
         var ocrUsed = 0
@@ -414,6 +434,7 @@ final class AnalysisEngine {
                 defer {
                     out[i].contentDone = true
                     ScanCache.shared.store(out[i], asset: assets[i])
+                    pendingDone += 1
                 }
 
                 let asset = assets[i]
@@ -426,6 +447,9 @@ final class AnalysisEngine {
                 // 「画面里有没有裸露的人」，不需要读字、不需要场景语义。
                 // 其余分类（发票 / 文档 / 截图）对视频没有意义，不做。
                 if item.isVideo {
+                    // 默认就归「视频」这一桶。以前视频停在 `.other` 且不进桶，
+                    // 结果分类 tab 号称覆盖全部素材，实际少了五百多个视频。
+                    out[i].category = .video
                     if let score = privacyScoreForVideo(asset: asset) {
                         out[i].privacyScore = score
                         if score >= ContentAnalyzer.privacyThreshold {
@@ -573,8 +597,11 @@ final class AnalysisEngine {
                 }
             }
 
-            if i % 20 == 0 || i == total - 1 {
-                progress?(i + 1, total, "正在识别内容分类")
+            // 进度按「真正跑过的张数」报。跳过缓存的那一大批不该占用进度条，
+            // 否则补扫时会在 0% 待很久（两万张里一万张是直接跳过的）。
+            if pendingDone > lastReported && (pendingDone % 20 == 0 || pendingDone == pending) {
+                lastReported = pendingDone
+                progress?(pendingDone, pending, phaseText)
             }
             if i % 800 == 0 && i > 0 {
                 ScanCache.shared.flush()
@@ -1051,6 +1078,13 @@ struct CachedPhoto: Codable {
     var faceArea: Double
     var privacyScore: Double
     var contentDone: Bool
+    /// 算出这条内容结论时用的信号版本，见 `ScanCache.currentSignalVersion`。
+    ///
+    /// 只有弱结论需要它：强结论永远不会被新信号推翻，记版本没有意义。
+    /// 声明成 Optional 是为了**老缓存能解出来**——合成 Codable 对非 Optional 字段
+    /// 缺失会直接抛错，`try?` 一吞整份缓存变空，正好触发我们想避免的全量重扫。
+    /// nil 当作 0，于是升级后弱结论自动补扫一次。
+    var signalVersion: Int?
 
     init(item: PhotoItem, asset: PHAsset) {
         self.id = item.id
@@ -1073,6 +1107,18 @@ struct CachedPhoto: Codable {
         self.faceArea = item.faceArea
         self.privacyScore = item.privacyScore
         self.contentDone = item.contentDone
+        self.signalVersion = ScanCache.currentSignalVersion
+    }
+
+    /// 这条缓存的结论还能不能用？不能的话要重跑一遍内容识别。
+    ///
+    /// 判据只有一条：**弱结论 + 信号版本落后**。
+    /// 强结论不重跑（发票不会因为多扫了个码就变成别的），
+    /// 视频也不重跑（视频只判隐私，跟内容信号无关）。
+    var needsContentRescan: Bool {
+        guard contentDone, !isVideo else { return false }
+        guard ContentCategory.fromCache(categoryRaw).isSoftCategory else { return false }
+        return (signalVersion ?? 0) < ScanCache.currentSignalVersion
     }
 
     func apply(to item: inout PhotoItem) {
@@ -1107,6 +1153,16 @@ final class ScanCache {
 
     /// 算法变了就 +1，旧缓存整体作废——总比拿旧口径的结果去比新阈值好。
     private let version = 1
+
+    /// 内容信号版本：**新增一类能推翻弱结论的信号时 +1**。
+    ///
+    /// 和上面的 `version` 是两件事，别混：
+    /// - `version` 一变，两万多条缓存全作废，用户要重扫十几分钟；
+    /// - 这个一变，只有弱结论（截图/文档/其他，约一万条）重判，强结论照常命中。
+    ///
+    /// 1 = 1.5(24) 加入通用二维码。以前是给二维码单写一个补扫函数，
+    /// 下次加「聊天截图」又得再写一遍；现在只需要把这个数字 +1。
+    static let currentSignalVersion = 1
 
     private let io = DispatchQueue(label: "com.eddie.photoorganizer.scancache", qos: .utility)
     /// 扫描线程写、界面线程读，必须加锁。锁里只做字典操作，不碰 IO。

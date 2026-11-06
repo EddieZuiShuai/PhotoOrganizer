@@ -294,6 +294,52 @@ final class PhotoLibraryService {
             completion(success, error)
         })
     }
+
+    // MARK: - 隐藏
+
+    /// 把照片/视频放进系统「已隐藏」相簿，或从里面取出来。
+    ///
+    /// 为什么用系统的而不是自己记一份黑名单：
+    /// 1. iOS 16 起「已隐藏」相簿默认要 Face ID 才能打开，等于白拿一层生物锁；
+    /// 2. 我们取图本来就是 `includeHiddenAssets = false`（见 `fetchAllAssets`），
+    ///    隐藏后它们会自动从 App 里消失，不用另外维护一套过滤逻辑。
+    ///
+    /// 注意：隐藏不是删除，照片仍在相册里，也不会进「最近删除」。
+    func setHidden(_ hidden: Bool, assets: [PHAsset], completion: @escaping (Bool, Error?) -> Void) {
+        guard !assets.isEmpty else {
+            completion(true, nil)
+            return
+        }
+        PHPhotoLibrary.shared().performChanges({
+            for asset in assets {
+                PHAssetChangeRequest(for: asset)?.isHidden = hidden
+            }
+        }, completionHandler: { success, error in
+            completion(success, error)
+        })
+    }
+
+    /// 系统「已隐藏」相簿里的全部条目。
+    ///
+    /// 必须显式 `includeHiddenAssets = true`，否则连这个相簿自己都取不到内容——
+    /// 这是 PhotoKit 里最容易踩的一处：相簿是对的，开关没开就是空的。
+    func fetchHiddenAssets() -> [PHAsset] {
+        let collections = PHAssetCollection.fetchAssetCollections(
+            with: .smartAlbum, subtype: .smartAlbumAllHidden, options: nil)
+        guard collections.count > 0, let album = collections.firstObject else { return [] }
+
+        let options = PHFetchOptions()
+        options.sortDescriptors = [NSSortDescriptor(key: "creationDate", ascending: false)]
+        options.includeHiddenAssets = true
+
+        let result = PHAsset.fetchAssets(in: album, options: options)
+        var assets: [PHAsset] = []
+        assets.reserveCapacity(result.count)
+        result.enumerateObjects { asset, _, _ in
+            assets.append(asset)
+        }
+        return assets
+    }
 }
 
 #if DEBUG

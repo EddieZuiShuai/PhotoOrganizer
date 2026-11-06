@@ -168,7 +168,13 @@ final class VideoPlaybackModel: ObservableObject {
     @Published var failed = false
     @Published var currentTime: Double = 0
     @Published var duration: Double = 0
-    @Published var isMuted = false
+    /// 默认静音。全屏预览的语义是「看一眼这张是什么」，不是「我要听」；
+    /// 而且这个页面在清理、分类、大文件三个入口共用，突然外放很尴尬。
+    /// 与逐张过（`TriageVideoBox`）对齐成同一套心智：静音进场，想听再点喇叭。
+    ///
+    /// 注意这里只在**本次预览会话内**记住用户的选择：手动开过声音后翻到下一段
+    /// 仍然有声（`stop()` 不清这个值），关掉重开才回到静音默认。
+    @Published var isMuted = true
 
     private var timeObserver: Any?
     private var endObserver: NSObjectProtocol?
@@ -233,7 +239,9 @@ final class VideoPlaybackModel: ObservableObject {
 
     func play() {
         guard let player = player else { return }
-        activateAudioSession()
+        // 静音时不去激活音频会话：`.playback` 一旦 setActive 就会掐掉用户
+        // 正在听的音乐/播客。默认就是静音，白白打断别人不合理。
+        if !isMuted { activateAudioSession() }
         player.play()
         isPlaying = true
     }
@@ -267,6 +275,9 @@ final class VideoPlaybackModel: ObservableObject {
     func toggleMute() {
         isMuted.toggle()
         player?.isMuted = isMuted
+        // 只有「正在播 + 刚切到有声」才抢音频会话。
+        // 暂停状态下开声音不该打断别人的背景音乐——等按播放时 play() 再去激活。
+        if !isMuted && isPlaying { activateAudioSession() }
     }
 
     // MARK: 内部
