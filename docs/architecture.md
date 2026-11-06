@@ -39,11 +39,16 @@ Models/
   ▼
 [阶段 3] contentPass            global(qos: .utility)  ← 降优先级，不跟滚动抢 CPU
   逐张：320px 分类 → 文档/截图先试二维码（发票码→发票票据；其余只记 `sawGenericQR`，最后按弱分类落地）→ 文档类补 1024px（二维码 + OCR）
-  预算：OCR 3000 张｜1024px 补读 1500 张｜小图读字兜底 200 张｜内存 < 220MB 停补读
+  预算：OCR 主池 3000 张｜截图纸池 300 张｜1024px 补读 1500 张｜小图读字兜底 200 张｜内存 < 220MB 停补读
   ▼
 [阶段 4] assemble(contentReady: true)   回填分类 → 重算建议分
+  │
+  ├──→ 主线程 completion(final)        ← 分类页出现（人脸还是 320px 的结论）
   ▼
-  主线程 completion(final)
+[阶段 5] refineFacesPass        global(qos: .utility)
+  只对人物类里「小图只数出 0~1 张脸」的照片，重取 512px 再数一次
+  ▼
+[阶段 4'] assemble 再跑一次 → 主线程 onFaceRefined(finalFace)
 ```
 
 关键设计：
