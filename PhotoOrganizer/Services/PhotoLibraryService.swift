@@ -52,21 +52,29 @@ final class PhotoLibraryService {
     func thumbnail(for asset: PHAsset, maxPixel: CGFloat = 256) -> UIImage? {
         let options = PHImageRequestOptions()
         options.isSynchronous = true
-        options.deliveryMode = .fastFormat
+        // ⚠️ 别用 .fastFormat：在部分 iOS 18 模拟器上它会返回 PHPhotosError 3303
+        // （image=nil、err=未能完成操作），导致整轮扫描缩略图全 nil、哈希/清晰度/分类
+        // 一个都算不出来，清理页每类都是 0，连「逐张过」入口都不显示（UI 回归全挂）。
+        // .opportunistic 优先走快速通道、拿不到再回退高质量，两头都不落空。
+        options.deliveryMode = .opportunistic
         options.resizeMode = .fast
         options.isNetworkAccessAllowed = false
 
         var output: UIImage?
+        var gotBest = false
         PHImageManager.default().requestImage(
             for: asset,
             targetSize: CGSize(width: maxPixel, height: maxPixel),
             contentMode: .aspectFit,
             options: options
         ) { image, info in
-            if let degraded = info?[PHImageResultIsDegradedKey] as? Bool, degraded {
-                return
-            }
-            if let image = image {
+            guard let image = image else { return }
+            let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+            if !degraded {
+                output = image
+                gotBest = true
+            } else if !gotBest {
+                // 只拿到降级图也先收下，总比 nil 强——别让一次降级把扫描结果清空。
                 output = image
             }
         }
@@ -138,7 +146,7 @@ final class PhotoLibraryService {
 
     /// 给 OCR 用的清晰大图（同步、高质量、精确缩放）。
     ///
-    /// 不能直接用 thumbnail()：那个走 .fastFormat，拿到的是「快速降级图」，
+    /// 不能直接用 thumbnail()：那个走 .opportunistic，拿到的是小尺寸快速图，
     /// 把它放大到 1024 只是把一张糊图放大，字照样读不出来。
     /// 同理不碰 iCloud：为了补读文字去下载上千张原图，代价太大，读不到就算了。
     func imageForOCR(for asset: PHAsset, maxPixel: CGFloat = 1024) -> UIImage? {
