@@ -85,6 +85,7 @@
 - **逐张过批量删除的下标回退** → 待删只能来自已经滑过去的张，所以 `deleteMany` 直接 `index -= removed`，不用逐张算下标；同时清空 `history`（撤销链已乱）
 - **改隐私公式要作废旧结论** → 缓存里 `contentDone = true` 的条目会整段跳过内容识别。只改算法不作废缓存 = 用户永远看不到修复。作废走 `privacyModelVersion` + `ScanCache.resetPrivacyJudgements()`，**不要动 `ScanCache.version`**（那会作废整库，用户要重扫十几分钟）
 - **`git push` 报 schannel / TLS 错** → 环境里有 `http_proxy=127.0.0.1:5804`，git 走它必然握手失败。可靠写法是**行内清空四个变量**：`http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= git push`（`env -u` 在本机 Bash 里会静默失败，别用）
+- **取缩略图别用 `.fastFormat`** → 在 iOS 18 模拟器上它会返回 `PHPhotosError 3303`（`image=nil`），导致整轮扫描缩略图全 nil、结果页每类都是 0、连「逐张过」入口都不显示（Maestro 9 条 flow 全卡在 `逐张过不可见`）。取图一律 `.opportunistic`（优先快、拿不到回退高质量）；`po-diag.txt` 里三种 deliveryMode 的对比能一眼看出这坑
 
 ## 当前版本
 
@@ -94,5 +95,7 @@
 3. **首页首启提示卡**：`tutorialSeenVersion` 驱动，放「开始扫描」下方，看完自动消失（补上了 21 一直缺的「新用户看不到教程入口」）。
 4. **我的 → 帮助与支持**：补「邮件反馈」（`eddie.wu@qq.com`）+「常见问题」5 条。
 5. **清理页瘦身**：删顶部「空间」按钮（和底部 tab 重复）、发票数字换成「相似组」、「正在识别发票与分类」→「正在识别分类」、导出清单按钮及 `exportText` 移除、筛选按钮放大。
+
+`1.5 (23)`：修缩略图取图 `.fastFormat` → `.opportunistic`（iOS 18 模拟器返回 3303 导致扫描全 0，UI 回归 9 条全挂）；UI 回归 9/9 通过后升号出包。
 
 `1.5 (21)`：隐私视频、隐私拆两张卡、隐私 v3、分类就地 NavigationStack 下钻、逐张过挪到列表上方、新手教程 5 页；隐私开关默认「不显示 + 模糊显示」；修点喇叭顺带暂停的 bug。
