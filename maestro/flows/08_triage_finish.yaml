@@ -5,6 +5,17 @@ name: 08 逐张过：连续标记后关掉，标记要带回列表
 - tapOn: "三列"
 
 - tapOn: "逐张过"
+
+# 同上：有进度先归零，否则会从别的用例留下的位置接着走
+- runFlow:
+    when:
+      visible:
+        id: "triage-reset"
+    commands:
+      - tapOn:
+          id: "triage-reset"
+      - tapOn: "从头开始"
+
 - assertVisible: "1 / [0-9]+"
 
 # 连划四张：删、删、留、留 —— 每划一次都确认计数器真的前进了。

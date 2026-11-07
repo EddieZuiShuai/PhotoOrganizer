@@ -1,0 +1,54 @@
+appId: com.eddie.photoorganizer
+name: 10 逐张过：进度记忆 + 待删标记恢复
+---
+# 1.5(26) 的新能力：退出再进来不是从第一张重来。
+# 这里验两件事——位置接得上、待删标记也一起回来了。
+# （只存位置不存标记的话，那张照片会变成「判过了但标记没了」：
+#   既不会重看，也不会被删，等于被静默丢掉。）
+
+- runFlow: ../subflows/open_large.yaml
+- tapOn: "三列"
+
+- tapOn: "逐张过"
+
+# 前面的用例可能留下进度，先归零
+- runFlow:
+    when:
+      visible:
+        id: "triage-reset"
+    commands:
+      - tapOn:
+          id: "triage-reset"
+      - tapOn: "从头开始"
+
+- assertVisible: "1 / [0-9]+"
+
+# 连标两张 → 停在第 3 张
+- tapOn:
+    id: "triage-mark"
+- assertVisible: "2 / [0-9]+"
+- tapOn:
+    id: "triage-mark"
+- assertVisible: "3 / [0-9]+"
+- assertVisible: "待删 2"
+
+# 关掉：标记要带回列表
+- tapOn: "关闭逐张过"
+- extendedWaitUntil:
+    visible: "已选 2 张.*"
+    timeout: 10000
+
+# 重新进来：接第 3 张，不是第 1 张
+- tapOn: "逐张过"
+- assertVisible: "3 / [0-9]+"
+- assertVisible: "待删 2"
+- takeScreenshot: 20_triage_resume
+
+# 收尾：清掉勾选，别把状态留给后面的用例
+- tapOn: "关闭逐张过"
+- extendedWaitUntil:
+    visible: "已选 2 张.*"
+    timeout: 10000
+- tapOn:
+    id: "action-clear-selection"
+- assertVisible: "点一下选中.*"

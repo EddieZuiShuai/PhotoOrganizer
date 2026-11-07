@@ -5,6 +5,19 @@ name: 03 逐张过：首滑、连划、撤销
 - tapOn: "三列"
 
 - tapOn: "逐张过"
+
+# 1.5(26) 起逐张过会记住「看到哪」，本 flow 跑之前别的用例可能已经判过几张。
+# 有进度就先「从头再筛」，否则下面「1 / N」的断言没有确定答案。
+# 顺带把「重来」这条路径也覆盖掉。
+- runFlow:
+    when:
+      visible:
+        id: "triage-reset"
+    commands:
+      - tapOn:
+          id: "triage-reset"
+      - tapOn: "从头开始"
+
 - assertVisible: "左滑待删 · 右滑保留"
 # 张数取决于相册里有多少照片，这里只断言「停在第 1 张」
 - assertVisible: "1 / [0-9]+"
