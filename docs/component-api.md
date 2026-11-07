@@ -165,12 +165,12 @@ func compress(asset: PHAsset, completion: @escaping (Result<Outcome, Error>) -> 
 | `CloudNoticeCard` / `CloudNoticeOverlay` / `CloudNoticeSheet` | `TutorialView.swift` | 首启「为什么需要联网」说明。`Card` 是内容本体（`onDismiss` + `showsFooterHint`）；`Overlay` 盖首页，遮罩吞点击**不关闭**；`Sheet` 给「我的 › 关于 › 网络与 iCloud」重看，必须用 sheet——overlay 盖不住 tab bar |
 | `SpaceStats` | `ContentView.swift` | 体积统计单一口径（结果页与空间 tab 共用） |
 | `SpaceDashboardView` / `FilterSheet` | `DashboardView.swift` | 体积看板（tab 页，不再是 sheet）/ 时间段与相册筛选 |
-| `SwipeTriageView` / `TriageMedia` | `SwipeTriageView.swift` | 逐张过主界面 / 卡片媒体（照片 fit、视频可播、Live 自动播一次）。`blurred: true` 时先糊住，中央一个「点一下看原图」。`isPrivacy: true` 时底部多第五颗「隐藏」（只作用于当前这张，走 `onHide` 回调），**不能拿 `blurred` 代替**——设置里关掉打码后 `blurred` 是 false，但仍是隐私组 |
+| `SwipeTriageView` / `TriageMedia` | `SwipeTriageView.swift` | 逐张过主界面 / 卡片媒体（照片 fit、视频可播、Live 自动播一次）。`blurred: true` 时先糊住，中央一个「点一下看原图」。`isPrivacy: true` 时底部多第五颗「隐藏」（只作用于当前这张，走 `onHide` 回调），**不能拿 `blurred` 代替**——设置里关掉打码后 `blurred` 是 false，但仍是隐私组。1.5(29) 起 Live 的 `LIVE` 胶囊 + 静音键都在**画面左下角**（`triage-live-replay` / `triage-live-mute`），视频喇叭同理（`triage-video-mute`），卡片底部信息条相应上移 44pt |
 | `TriageVideoBox` | `SwipeTriageView.swift` | 单卡片视频播放器，划走即停 |
-| `TriageProgressStore` | `SwipeTriageView.swift` | 逐张过进度（判过的 id + 待删标记），按上下文 key 存 UserDefaults |
+| `TriageProgressStore` | `SwipeTriageView.swift` | 逐张过进度（判过的 id + 待删标记），按上下文 key 存 UserDefaults。**`ObservableObject`**：写操作 `&+= revision`，入口那行「已看 N · 继续」靠 `@ObservedObject` 订阅才跟得上「从头再筛一遍」 |
 | `TriageImageCache` / `TriageMetrics` | `SwipeTriageView.swift` | 预取缓存（30 张，跳过视频）/ 统一取图尺寸 |
 | `TriageEntryBar` | `ContentView.swift` | 「逐张过 N 项」入口条，清理页与分类页共用。有进度时右侧显示「已看 M · 继续」 |
-| `PhotoPreviewView` / `ZoomableImageView` / `VideoPlaybackModel` | `PhotoPreviewView.swift` | 大图 / 缩放 / 视频播放 |
+| `PhotoPreviewView` / `ZoomableImageView` / `VideoPlaybackModel` | `PhotoPreviewView.swift` | 大图 / 缩放 / 视频播放。`isPrivacy: true` 时底部三颗「待删 / 隐藏 / 立即删除」（`preview-hide`），隐藏走 `onHide` 回调；待删按钮文案是「待删 · 取消待删」，和逐张过同名 |
 | `LivePhotoModel` / `LivePhotoSurface` / `LivePhotoLoader` | `PhotoPreviewView.swift` | Live 播放状态（token 驱动）/ `PHLivePhotoView` 包装（禁手势）/ 取图。`LivePhotoSurface` 也用在逐张过卡片里 |
 | `LivePhotoStage` | `PhotoPreviewView.swift`（private） | 预览里的一页 Live：静帧可缩放 + 动态层叠加，只给当前页装载 |
 

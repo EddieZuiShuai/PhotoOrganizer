@@ -103,8 +103,18 @@
 - **iOS 16 起，第三方 App 读系统「已隐藏」相簿永远是空** → 只要用户开着「用 Face ID 查看已隐藏相簿」（**默认就是开的**），`smartAlbumAllHidden` 和 `includeHiddenAssets = true` 都会被系统忽略，返回空结果。Apple 工程师在论坛确认没有任何 API 能绕过，只能弹 `PHPickerViewController` 让用户手选。所以：**不要写「隐藏后可在 App 里找回」这种文案**，那是在骗人；空态要解释成「照片还在，是 App 读不到」并给跳系统相册的出口。`hiddenEverCount` 只用来区分「真没藏过」和「藏过但读不到」
 - **`PHLivePhotoView` 不能直接丢进 ZStack** → 它拿到的是父容器的安全区尺寸，而 `ZoomableImageView` 是全屏 + `ignoresSafeArea` + `scaledToFit`，两者对不上时播放会在照片上方露出一条重复内容（1.5(27) 真机反馈）。必须按 `asset.pixelWidth/pixelHeight` 自己算出 fit 后的矩形，精确设成它的 frame，再加 `.clipped()`
 - **断言要能区分页面，否则点击被吞时它照样"通过"** → run #27 的 04 号就是这么挂的：扫完刚拿到权限那一轮界面还在变，点「去看大文件」被吞、页签没换，但「单列」在清理页上有个一模一样的按钮，`assertVisible: 单列` 直接过了，后面几步全错位（最后一下点在照片上，把图选中了），报错却指向一句"按体积从大到小不可见"，非常误导。规矩：**每进入一个新页面，断言必须用这一页独有、别处不存在的文字**；一次点击后又要点下一页时，把两下绑进 `retry` 整组重试（见 `maestro/subflows/open_large.yaml`）
+- **界面里永远不要出现 `xxxErrorDomain 错误 3072`** → 用户看不懂，只会以为 App 坏了。一律走 `friendlyPhotoError(error)`（在 `PhotoLibraryService.swift` 末尾），原始错误进 `NSLog`。顺带记两条真机遇到过的码：**3072 = `userCancelled`**，相册忙 / 刚从后台回来 / 系统弹窗被划掉都会报，属于「这次没成」而不是「坏了」，`setHidden` 已经自动重试一次；3303 = 原图还在 iCloud 没下来
+- **纯 class 的缓存/store 改了数据，视图不会自己重绘** → `TriageProgressStore.judgedCount()` 是普通 getter，1.5(28) 之前「从头再筛一遍」清空后，入口那条「已看 N · 继续」还挂着旧数字（用户原话「点了重置，退出还是已看 7」）。凡是这种「读一次就拿来画界面」的单例，一律做成 `ObservableObject` + 一个 `@Published revision`，写操作里 `&+= 1`，视图用 `@ObservedObject` 订阅
+- **`.sheet` 的下滑关闭不执行你的收尾代码** → 只点 X 才走 `finish()`，一划就什么都不留：逐张过标了 3 张、下滑回到列表，标记全丢且没有任何提示。要 `onDisappear` 补一条等价路径，并用一个 `finished` 标志防重复回调
 
 ## 当前版本
+
+`1.5 (29)`：第二轮真机反馈——
+1. **大图预览也能藏**：隐私组一行三颗「待删 / 隐藏 / 立即删除」。文案统一成「待删 · 取消待删」，和逐张过那颗同名（之前叫「标记待删」，用户以为不是一回事）。
+2. **系统错误码不上界面**：`friendlyPhotoError()` 统一翻译，`PHPhotosErrorDomain 错误 3072` 这类原文只进 `NSLog`。3072 = `userCancelled`，在相册忙时**会偶发**，`setHidden` 里自动重试一次。
+3. **「从头再筛一遍」后入口还显示「已看 7」**：`TriageProgressStore` 原来是纯 class，`judgedCount` 是拉取式的，清空后没人通知重绘。改成 `ObservableObject` + `@Published revision`。
+4. **下滑关掉逐张过会丢标记**：`finish()` 只挂在 X 上。补 `onDisappear` 兜底（`finished` 防重复回调）。
+5. **逐张过 LIVE 太难点**：从右上角 9pt 小药丸挪到左下角大胶囊（13pt 图标），并把静音键一起放过来（40×40）。卡片底部信息条相应上移 44pt。
 
 `1.5 (28)`：真机反馈四条，两条是系统限制、两条是真问题——
 1. **「已隐藏的照片」永远是空的是 iOS 限制**：iOS 16 起默认要求 Face ID，第三方 App 拿到空相簿，没有 API 能绕过。空态改成说明 + 跳系统相册；确认弹窗和 toast 不再承诺「App 里可找回」。
