@@ -14,9 +14,30 @@
 | 技术栈 | SwiftUI + Photos + Vision，少量 UIKit；**无第三方依赖、无 SPM** |
 | 规模 | 11 个 Swift 文件约 8.1k 行；最大是 `Views/ContentView.swift`（约 3.1k 行） |
 | Bundle ID | `com.eddie.photoorganizer` |
-| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.5 / 28**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
+| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.5 / 29**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
 | 怎么编译 | **没有 Mac。** push 到 `main` → GitHub Actions `build.yml` → 下载 ipa → Windows 上用 Sideloadly 签名安装 |
 | 怎么测 | Maestro 云端 UI 用例 11 条（`maestro/flows/`），手动触发 `ui-test.yml`，本机用 `_ci_check.py` 取回结论 |
+| 产物放哪 | 安装包一律放**项目根**（`PhotoOrganizer/` 的上一层）的 `发布包/`，命名 `PhotoOrganizer_v<短版本>_b<构建号>.ipa`，只留最新一版。`一键重签安装.cmd` 和 `resign_helper.py` 放在项目根，脚本按 `_bNN` 取最大，**不要**再往根目录或 `最新包/` 里丢散包 |
+
+## 磁盘上的样子
+
+`PhotoOrganizer/` 是 git 仓库；它的**上一层**（用户口中的"项目根"）只留两个可双击的入口，其余都归档了：
+
+```
+第一款ios应用\
+├── 一键重签安装.cmd      ← 用户唯一会双击的东西（调同目录 resign_helper.py）
+├── resign_helper.py      自动去 发布包\ 找 _bNN 最大的包，并打印版本号
+├── 发布包\               所有 .ipa，只留最新一版；旧版从 GitHub Actions artifact 取
+├── 工具\                 手机配对/诊断、编译通知、图标生成、离线照片分析（各带 README.txt）
+├── 文档\                 方案评审与测试报告的 HTML（v1.5~v3.0、测试清单、安装指引）
+├── 真机测试\             11-05 排查 Live 残影的系统快照（只剩 .ips 与两个分析脚本）
+└── PhotoOrganizer\       ← 本文件所在，代码 + docs + maestro + .github
+```
+
+**别在仓库里生成 ipa。** 2026-11-08 整理时发现根目录、`最新包/`、`PhotoOrganizer/最新包/`、
+`PhotoOrganizer/` 四处共 14 个 ipa，其中根目录那个停在 1.4(19)，而 `resign_helper.py`
+读的正是它——用户点了安装却装了十天前的老包。现在脚本改成扫目录取最大构建号，并在窗口里
+打印「版本 1.5（构建 29）」；下次要改路径，记得保住这个"打印版本号"的行为。
 
 ## 铁律（违反即回退，不接受"顺手优化"）
 
