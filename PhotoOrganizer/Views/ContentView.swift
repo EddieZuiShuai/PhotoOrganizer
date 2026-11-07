@@ -655,11 +655,6 @@ struct ResultView: View {
     /// 起因：建议清理页右上角点一下「全选 2779」，底部按钮立刻变成「删除 2779 张」，
     /// 中间没有任何缓冲；而建议里本来就混着误判，点错的代价太大。
     @State private var bulkConfirm: BulkConfirm?
-    /// 「看着像重复、但原图在 iCloud」的组。扫描时只做外观比对，不下载；
-    /// 用户点「联网核对」才真的拉原图算 SHA-256（1.5(30) A 方案）。
-    @State private var pendingVerifyGroups: [PendingDuplicateGroup] = []
-    @State private var confirmVerify = false
-    @State private var verifying = false
     /// 超过这个数量才拦。几十张的批量操作不值得多弹一次框。
     private let bulkConfirmThreshold = 500
 
@@ -793,16 +788,6 @@ struct ResultView: View {
         // 失败一律走底部一行字（`showToast`），不再弹「出错了」。
         // 弹窗会打断操作、要再点一次「知道了」，而失败原因往往只是「系统忙，再点一次」。
         .confirmationDialog(
-            "联网核对 \(pendingVerifyGroups.count) 组？",
-            isPresented: $confirmVerify,
-            titleVisibility: .visible
-        ) {
-            Button("开始核对（会联网）") { runDuplicateVerify() }
-            Button("取消", role: .cancel) {}
-        } message: {
-            Text("会从 iCloud 下载 \(pendingVerifyDownloadCount) 张原图来比对。扫描本身从不联网，这一步只在你点了才发生。")
-        }
-        .confirmationDialog(
             "压缩这段视频？",
             isPresented: Binding(
                 get: { confirmCompress != nil },
@@ -829,7 +814,11 @@ struct ResultView: View {
                 startIndex: target.startIndex,
                 selectedIDs: $selectedIDs,
                 isPrivacy: isPrivacyTab,
-                onHide: { item, done in hideOne(item, completion: done) }
+                onHide: { item in
+                    hideOne(item) { success, msg in
+                        if !success, let msg = msg { showToast(msg) }
+                    }
+                }
             ) { item in
                 deleteItems([item])
             }
@@ -3087,7 +3076,11 @@ struct CategoryDetailView: View {
                 startIndex: target.startIndex,
                 selectedIDs: $selected,
                 isPrivacy: category.isPrivacy,
-                onHide: { item, done in hideOne(item, completion: done) }
+                onHide: { item in
+                    hideOne(item) { success, msg in
+                        if !success, let msg = msg { showToast(msg) }
+                    }
+                }
             ) { item in
                 delete([item])
             }
