@@ -55,6 +55,13 @@ python watch_build.py --test     # 只测通知通道
 - 编译：`xcodebuild -configuration Release -destination 'generic/platform=iOS'`，显式关签名（`CODE_SIGNING_ALLOWED=NO`），产物在 CI 里打包成 ipa。
 - 产物保留 30 天。
 
+### `unit-test.yml` — L1 白盒单测
+
+- 触发：push 到 `main` / `master`，或手动。
+- 流程：选一台最新 iPhone 模拟器 → `xcodebuild test`（Debug + 关签名）跑 `PhotoOrganizerTests` 里的 XCTest 单测。
+- 只测纯逻辑（并查集 / 汉明距离 / 分类语义 / 错误文案），不碰相册与 UI。
+- 与出包互不影响：单测红了不影响 `build.yml` 出 ipa、不影响装手机。
+
 ### `ui-test.yml` — 云端 UI 测试
 
 - 触发：**仅手动**（`workflow_dispatch`）。

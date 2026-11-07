@@ -3,7 +3,7 @@
 > 规则：**「现在做」最多 3 条**，超了说明没在收口，先砍。每条必须写"怎么算完成"，不写"优化一下性能"这种无法验收的话。
 > 完成后移到「已完成」，不要留在上面当装饰。
 
-当前版本：`1.5 (29)` · 最后更新：2026-11-07
+当前版本：`1.5 (30)` · 最后更新：2026-11-08
 
 ## 现在做（P0）
 
@@ -83,14 +83,13 @@
 | 7 | 拆 `ContentView.swift`（约 3.1k 行，`ResultView` 占大半） | 拆成 `ResultView.swift` + `ResultGrid.swift` + `ResultActions.swift` + `CategoryView.swift`；注意 pbxproj 要补引用 |
 | 8 | 发票数复核：15 版 122 → 18 版 90 | 缓存里 72 张有票据 OCR 关键词、18 张仅二维码命中；「文档」1646 张里票据类关键词 **0** 条。要复算需旧版缓存，已不存在。**25 版修了优先级（二维码不再立即 return），这次升级会重判全部二维码条目，验收时重点看发票数有没有回升** |
 | 9 | **iCloud 云端专属照片：降级标记 + 按需补全** | 明细见上面「1.5(27) B」的 C1~C7。**别做成"扫描前先下载整个相册"**：两万张优化版按 1.5 MB 算就是 30 GB，用户不可能接受。真正要改的是「低质量输入不落死结论」+ 一个用户手动触发的补全入口 |
-| 10 | **完全重复核对会联网读原图** | `originalData()` 的 `isNetworkAccessAllowed = true`，所以候选对（dHash 极近 + 文件大小相同）会从 iCloud 拉原图算 SHA-256。量很小、但目前**没有开关也没有提示**，而且 `hashCache` 只活在单次运行里，下次全量扫描还要再拉一遍。要么把哈希写进 `ScanCache`（一张只算一次），要么加个「深度核对（会联网）」的手动入口 |
+| 10 | ~~完全重复核对会联网读原图~~ | 1.5(30) A 方案已解决：扫描永不联网，`originalBytes` 默认 `allowNetwork=false`，候选对只标 `PendingDuplicateGroup` 待核对。剩下的优化是「核对过一次就把哈希写进 `ScanCache`」，避免下次再下载同一张 |
 
 ## 待定 / 单独立项
 
 | 任务 | 为什么单独 |
 |---|---|
 | 隐私照片分组 | 判定敏感（误标 = 尴尬），需要本地模型 + 二次确认 + 不进导出清单。单独设计，不在日常迭代里做 |
-| 单元测试 target | 1.5 又改了口径（隐私 v3、视频抽帧），没有测试只能靠真机目视。加 target 要动 pbxproj，值得单独立项 |
 
 ## 已知技术债
 
@@ -100,11 +99,18 @@
 | `PhotoItem` 字段全是 `var` + 默认值 | "没测"和"测出来是 0"容易混（`sharpnessScore = -1`、`brightness = -1`） | 下次改算法时考虑用 `Optional` 或小枚举 |
 | 隐私视频只抽 2 帧 | 长视频中间一闪而过的画面会漏；抽满全程代价不可接受 | 见 P0-3，实测后决定要不要加到 3 帧 |
 | 分类详情页与清理页各有一份删除逻辑 | 两份 `delete` 都是十行，改一处忘另一处会不一致 | 抽公共 `PhotoDeleter` 时一起改（建议和 P1-8 拆文件同批） |
-| 续扫测试脚本只删 base 缓存 | 19 起缓存拆成 `scan-cache-v1.plist` + `.delta`，只删 base 会留下增量日志，测不出真正的冷启动 | 下次做续扫测试前，给 `真机测试/resume_test.py` 的 `drop` 加一步删 `.delta` |
 | README 与实现漂移 | 曾写"只看不删"，实际早就能删 | 已修；靠 `AGENTS.md` 的同步义务防复发 |
 | 首扫刚结束那几秒界面还在变（内容识别收尾），Maestro 一次点击要等 4~6 秒才落下 | 用例容易点到旧坐标（run #27 的 04 号就是这么挂的）；真机上用户也可能"点了没反应" | 已用 `retry` 兜住用例。真机验收时留意这个迟钝感，明显的话考虑把收尾刷新节流或延后一拍 |
 
 ## 已完成
+
+### 1.5 (30) · 2026-11-08
+
+- **iCloud 重复核对改「永不联网」（A 方案）**：`originalData()` 拆成 `originalBytes(of:allowNetwork:)`，默认 `allowNetwork = false`。`findExactGroups` 不再对候选对读原图算 SHA-256，改成「本地 dHash 强候选（距离 ≤3 + 文件大小相同）→ 标成 `PendingDuplicateGroup` 待核对」。新增 `AnalysisResult.unverifiedExactGroups`，清理页顶部给「有 N 组待核对」提示 + 用户手动点「联网核对」才下载原图。全项目仅剩详情页大图（`loadImage`）一处联网。
+- **去掉批量「隐藏 N 张」**：清理页（`ResultView`）和分类详情页（`CategoryDetailView`）的底栏都回到「取消选中 / 删除」两键，删除 `confirmHide`、`hideSelected()` 死代码。隐藏只留两条单张路径：大图预览那颗、逐张过那颗；`hideOne` 统一成带 `completion` 回调（成功关预览、失败在预览顶部浮一行字）。
+- **3072 不自动重试**：`setHidden` 去掉 `apply(retried:)` 自动重试层，直接单次 `performChanges`；`friendlyPhotoError` 3072 文案缩短成「系统把这次操作取消了，再点一次就好」。
+- **L1 单元测试 target**：新增 `PhotoOrganizerTests`（hosted unit test），手改 `project.pbxproj` + scheme 的 TestAction。四个纯逻辑测试：`UnionFind`（传递性合并）、`hammingDistance`（汉明距离边界）、`ContentCategory`（隐私/强弱结论/旧名迁移）、`friendlyPhotoError`（3072 不泄漏）。
+- **修 `resume_test.py` 的 `drop`**：只删 base 会留下 `.delta` 增量日志，测不出冷启动；现在 `drop` 同时删 `scan-cache-v1.plist` 和 `scan-cache-v1.delta`。
 
 ### 1.5 (29) · 2026-11-07
 

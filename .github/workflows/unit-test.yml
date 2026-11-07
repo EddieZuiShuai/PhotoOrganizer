@@ -1,0 +1,64 @@
+name: Unit Tests (XCTest)
+
+# L1 白盒单测：只测纯逻辑（并查集 / 汉明距离 / 分类语义 / 错误文案），
+# 不碰相册、不碰 UI。因为开发机是 Windows、没有 Mac，这是唯一能跑它的地方。
+#
+# 与 build.yml（出包）职责分开、互不影响：单测红了不影响出包、装手机。
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+concurrency:
+  group: unittest-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-test:
+    name: iOS Simulator
+    runs-on: macos-15
+    timeout-minutes: 20
+
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 显示 Xcode 版本
+        run: xcodebuild -version
+
+      - name: 选一台 iPhone 模拟器并启动
+        id: sim
+        run: |
+          UDID=$(python3 - <<'PY'
+          import json, re, subprocess
+          data = json.loads(subprocess.check_output(["xcrun", "simctl", "list", "devices", "available", "-j"]))
+          cands = []
+          for runtime, devs in data["devices"].items():
+              m = re.search(r"iOS-(\d+)-(\d+)", runtime)
+              if not m:
+                  continue
+              ver = (int(m.group(1)), int(m.group(2)))
+              for d in devs:
+                  if d.get("isAvailable") and d["name"].startswith("iPhone"):
+                      cands.append((ver, d["name"], d["udid"]))
+          if not cands:
+              raise SystemExit("没有可用的 iPhone 模拟器")
+          cands.sort(reverse=True)
+          print(cands[0][2])
+          PY
+          )
+          echo "udid=$UDID" >> "$GITHUB_OUTPUT"
+          xcrun simctl boot "$UDID" || true
+          xcrun simctl bootstatus "$UDID" -b
+
+      - name: 跑单元测试
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project PhotoOrganizer.xcodeproj \
+            -scheme PhotoOrganizer \
+            -configuration Debug \
+            -destination "platform=iOS Simulator,id=${{ steps.sim.outputs.udid }}" \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            test
