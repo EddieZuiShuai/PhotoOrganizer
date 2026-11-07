@@ -102,6 +102,7 @@
 - **`PHImageResultIsInCloudKey == true` 是「没有返回图」，不是「图比较糊」** → 官方语义是 *no image was provided, because the asset data must be downloaded from iCloud*。所以在 `isNetworkAccessAllowed = false` 下取 iCloud 专属照片，`image` 是 nil；`thumbnail()` 现在直接 `return`，那张就停在默认分类「其他」里——数字上看不出来，实际根本没识别。修法见 `TODO.md` 的 1.5(27) B，**别图省事直接打开 `isNetworkAccessAllowed`**：两万张会把首扫拖成几小时，还烧用户流量
 - **iOS 16 起，第三方 App 读系统「已隐藏」相簿永远是空** → 只要用户开着「用 Face ID 查看已隐藏相簿」（**默认就是开的**），`smartAlbumAllHidden` 和 `includeHiddenAssets = true` 都会被系统忽略，返回空结果。Apple 工程师在论坛确认没有任何 API 能绕过，只能弹 `PHPickerViewController` 让用户手选。所以：**不要写「隐藏后可在 App 里找回」这种文案**，那是在骗人；空态要解释成「照片还在，是 App 读不到」并给跳系统相册的出口。`hiddenEverCount` 只用来区分「真没藏过」和「藏过但读不到」
 - **`PHLivePhotoView` 不能直接丢进 ZStack** → 它拿到的是父容器的安全区尺寸，而 `ZoomableImageView` 是全屏 + `ignoresSafeArea` + `scaledToFit`，两者对不上时播放会在照片上方露出一条重复内容（1.5(27) 真机反馈）。必须按 `asset.pixelWidth/pixelHeight` 自己算出 fit 后的矩形，精确设成它的 frame，再加 `.clipped()`
+- **断言要能区分页面，否则点击被吞时它照样"通过"** → run #27 的 04 号就是这么挂的：扫完刚拿到权限那一轮界面还在变，点「去看大文件」被吞、页签没换，但「单列」在清理页上有个一模一样的按钮，`assertVisible: 单列` 直接过了，后面几步全错位（最后一下点在照片上，把图选中了），报错却指向一句"按体积从大到小不可见"，非常误导。规矩：**每进入一个新页面，断言必须用这一页独有、别处不存在的文字**；一次点击后又要点下一页时，把两下绑进 `retry` 整组重试（见 `maestro/subflows/open_large.yaml`）
 
 ## 当前版本
 
