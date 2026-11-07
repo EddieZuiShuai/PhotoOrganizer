@@ -131,6 +131,17 @@ struct ContentView: View {
         }
         .onAppear {
             ScreenAwake.shared.setAppActive(scenePhase == .active)
+            #if DEBUG
+            // UI 用例专用：`maestro test <目录>` **不是按文件名顺序跑**的。
+            // 实测 11 条 flow 的完成顺序是 04/08/06/09/01/07/00/10/05/02/03 ——
+            // 等 00 跑到时，别的 flow 已经用 `scan.yaml` 里的 optional 点击把弹窗关掉、
+            // 把 cloudNoticeSeenVersion 写上了，断言必然失败。
+            // 带这个参数启动就无视标记强制弹一次，用例不再依赖执行顺序。
+            if ProcessInfo.processInfo.arguments.contains("-ForceCloudNotice") {
+                showCloudNotice = true
+                return
+            }
+            #endif
             // 首启（含从旧版本升上来第一次）说明一次。
             // 不做延时：onAppear 时首页已经布局完，直接出现不会闪白；
             // 加延迟反而会让 CI 里的 optional 点击和截图对不上时序。

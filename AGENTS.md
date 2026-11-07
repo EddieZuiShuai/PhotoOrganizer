@@ -97,6 +97,7 @@
 - **给 UIViewRepresentable 下「播一次」的指令不要直接存 view 引用** → SwiftUI 每次重建都换实例，存下来的引用翻页后指向一个已经不在屏幕上的 view。用 `playToken` / `stopToken` 两个计数器，`updateUIView` 里比对后执行；**先处理 stop 再处理 play**，否则「上一页 stop + 这一页 play」落在同一帧会变成刚播就停
 - **逐张过的进度别存下标** → 列表会缩（删照片）、会有新照片按时间插到最前、会换筛选，存 `index` 下次就落到一张完全不相干的照片上。存**判过的 id 集合**，进场取「第一个不在集合里的位置」。`TriageProgressStore` 同时存 `marked`：只存 judged 的话，一张标了待删的照片重启后会变成「判过了但标记没了」——既不会重看也不会被删。撤销要 `forget` 掉 judged，否则这张永远回不来
 - **隐私组的逐张过要自己糊** → 网格里的缩略图有 `blurPrivacyThumbnails` 打码，但 `TriageMedia` 是另一套渲染，不显式传 `blurred` 就等于绕过了那个设置。1.5(26) 传了，中央给一个「已打码 · 点一下看原图」的按钮（用 Button 不用 tap 手势，卡片挂着拖拽手势会把 tap 吞掉）
+- **`maestro test <目录>` 不按文件名顺序跑** → 实测 11 条的完成顺序是 04/08/06/09/01/07/00/10/05/02/03。任何"我这条叫 00，肯定第一个跑"的假设都会翻车：首启用例断言弹窗可见时，弹窗早被别的 flow 里 `scan.yaml` 的 optional 点击关掉、`cloudNoticeSeenVersion` 都写上了。依赖初始状态的用例要么用启动参数强制（`-ForceCloudNotice`，只在 DEBUG 生效），要么拆到独立目录单独跑一次
 - **iOS 没有「网络权限」可以申请** → 不要去找什么 `NSNetworkUsageDescription`（不存在），也别指望提前触发系统那个「允许使用无线局域网与蜂窝网络」——它是 App 首次**真正联网**时由系统弹的，不能预触发、不能改文案、不能拦。要让用户知道"为什么联网"，只能自己做一层说明（`CloudNoticeCard` + 键 `cloudNoticeSeenVersion`）
 - **`PHImageResultIsInCloudKey == true` 是「没有返回图」，不是「图比较糊」** → 官方语义是 *no image was provided, because the asset data must be downloaded from iCloud*。所以在 `isNetworkAccessAllowed = false` 下取 iCloud 专属照片，`image` 是 nil；`thumbnail()` 现在直接 `return`，那张就停在默认分类「其他」里——数字上看不出来，实际根本没识别。修法见 `TODO.md` 的 1.5(27) B，**别图省事直接打开 `isNetworkAccessAllowed`**：两万张会把首扫拖成几小时，还烧用户流量
 
