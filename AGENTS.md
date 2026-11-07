@@ -92,6 +92,10 @@
 - **分类卡上的「0」必须能区分「真没有」和「还没算」** → 补扫时用 `RefineStatus.backfill` 把数字换成百分比，人脸复核时用 `RefineStatus.isFaceRefine` 显示「复核中」。两个池子的分母不一样，进度条会从 100% 掉回 0%，不分开标会被当成卡死。1.5(23) 用户就是被这个「0」骗去清缓存重扫的
 - **`CachedPhoto` 加字段一律 Optional** → 合成 Codable 对非 Optional 字段缺失会抛错，`try?` 一吞整份缓存变空，**正好触发想避免的全量重扫**。`signalVersion` 声明成 `Int?`，nil 当 0 处理
 - **分类卡上的「0」必须能区分「真没有」和「还没算」** → 补扫时用 `RefineStatus.backfill` 把数字换成百分比。1.5(23) 用户就是被这个「0」骗去清缓存重扫的
+- **`PHLivePhotoView` 会吃掉翻页和缩放手势** → 它自带 `playbackGestureRecognizer`，直接叠在 TabView 里会让左右翻页和双指缩放全部失灵（这页就只剩「长按照片」一个手势）。必须同时做两件事：`isUserInteractionEnabled = false` **和** `playbackGestureRecognizer.isEnabled = false`。播放一律走 `startPlayback(with: .full)` 主动下指令，`didEndPlaybackWith` 里把 `isPlaying` 置回 false（`.full` 播完本来就停，不会循环）
+- **给 UIViewRepresentable 下「播一次」的指令不要直接存 view 引用** → SwiftUI 每次重建都换实例，存下来的引用翻页后指向一个已经不在屏幕上的 view。用 `playToken` / `stopToken` 两个计数器，`updateUIView` 里比对后执行；**先处理 stop 再处理 play**，否则「上一页 stop + 这一页 play」落在同一帧会变成刚播就停
+- **逐张过的进度别存下标** → 列表会缩（删照片）、会有新照片按时间插到最前、会换筛选，存 `index` 下次就落到一张完全不相干的照片上。存**判过的 id 集合**，进场取「第一个不在集合里的位置」。`TriageProgressStore` 同时存 `marked`：只存 judged 的话，一张标了待删的照片重启后会变成「判过了但标记没了」——既不会重看也不会被删。撤销要 `forget` 掉 judged，否则这张永远回不来
+- **隐私组的逐张过要自己糊** → 网格里的缩略图有 `blurPrivacyThumbnails` 打码，但 `TriageMedia` 是另一套渲染，不显式传 `blurred` 就等于绕过了那个设置。1.5(26) 传了，中央给一个「已打码 · 点一下看原图」的按钮（用 Button 不用 tap 手势，卡片挂着拖拽手势会把 tap 吞掉）
 
 ## 当前版本
 
@@ -101,6 +105,14 @@
 3. **首页首启提示卡**：`tutorialSeenVersion` 驱动，放「开始扫描」下方，看完自动消失（补上了 21 一直缺的「新用户看不到教程入口」）。
 4. **我的 → 帮助与支持**：补「邮件反馈」（`eddie.wu@qq.com`）+「常见问题」5 条。
 5. **清理页瘦身**：删顶部「空间」按钮（和底部 tab 重复）、发票数字换成「相似组」、「正在识别发票与分类」→「正在识别分类」、导出清单按钮及 `exportText` 移除、筛选按钮放大。
+
+`1.5 (26)`：三项浏览体验，一套交互模型——
+1. **Live 照片真的会动**：`PHLivePhotoView`（`LivePhotoSurface`）+ `requestLivePhoto`。进场自动播一次、**默认静音**、播完停在定格不循环、点 `LIVE` 胶囊从头重播一次。两个手势隔离必须做：`isUserInteractionEnabled = false` **和** `playbackGestureRecognizer.isEnabled = false`，否则它会把 TabView 翻页和双指缩放全吃掉。只给当前页装载，翻走就释放（视频轨 2~5MB）。
+2. **静音状态跨素材共用**：视频和 Live 各有一个 model，静音用两个 `onChange` 互为镜像，值相同不写，所以不震荡。在视频里开过声音，翻到 Live 也有声。
+3. **Live 标志**：缩略图左下角（`PhotoThumbView`，全 App 只有这一个缩略图组件，改一处全生效）、预览底部信息行、逐张过卡片类型标签。
+4. **逐张过进度记忆**：`TriageProgressStore` 存**判过的 id 集合**，不存下标——列表会缩、会有新照片插到最前、会换筛选，存下标会落到别人身上。`marked` 必须一起存，否则「判过但标记丢了」的照片既不会重看也不会被删。攒 2 秒落盘 + 退出 `flush()`。
+5. **分类页逐张过**：`TriageEntryBar` 抽成共用组件，清理页和分类详情页同一份实现。分类页传 `alive`（视频分类带当前体积筛选）。
+6. **隐私组的逐张过先糊住**：`TriageMedia.blurred`，中央一个「已打码 · 点一下看原图」按钮。逐张过里没有缩略图那层遮挡，不自己糊就等于绕过「隐私打码」这个设置。
 
 `1.5 (25)`：四个用户提的问题，一个数字对账——
 1. **「人物」拆成「单人照 / 合照」**：系统没有「这是谁」的接口（Vision 只有检测框，`VNGenerateFaceFeaturePrintRequest` 不存在），按人聚类做不了；人脸数量是唯一便宜且准确的替代。拆分后两类仍然互斥（一张照片的人脸数要么 1、要么 ≥2）。

@@ -8,8 +8,8 @@
 Views/            纯展示 + 交互状态，不碰 PHImageManager
   ContentView        首页 / 扫描页 / 结果页（含筛选、选中、删除、导出）
   DashboardView      空间看板（体积分布、时间窗口、相册筛选）
-  SwipeTriageView    逐张过（滑动标记，暂存不删）
-  PhotoPreviewView   大图 / 缩放 / 视频播放
+  SwipeTriageView    逐张过（滑动标记，暂存不删）+ TriageProgressStore
+  PhotoPreviewView   大图 / 缩放 / 视频播放 / Live 播放
 Services/         有状态、有队列，全部单例
   PhotoLibraryService  相册读取、缩略图、原图数据、SHA-256、删除
   AnalysisEngine       特征、分组、打分、两阶段调度
@@ -175,6 +175,24 @@ v2 的密度是个**比值**，比值在分母极小时会骗人。头像照就�
 | 手动排除的模糊照片 | `BlurIgnoreStore`（UserDefaults，上限 5000 条） | 跨启动 |
 | 选中 / 已删除 | `ResultView.@State` | 结果页 |
 | 逐张过的标记 | `SwipeTriageView` 内部 → `onFinish(Set<String>)` 回传 | 一次 triage |
+| 逐张过的进度 + 待删标记 | `TriageProgressStore`（UserDefaults，按上下文 key 存 id 集合） | 跨启动，30 天过期 |
+| 预览/逐张过的静音偏好 | `VideoPlaybackModel` / `LivePhotoModel`，两者互为镜像 | 一次预览会话 |
+
+## 浏览模型（1.5(26) 统一）
+
+三个入口，同一套交互词汇：
+
+| | 清理页列表 | 分类详情页 | 全屏预览 |
+|---|---|---|---|
+| 左右滑 | 逐张过（卡片堆，左滑待删/右滑保留） | **1.5(26) 起同左** | TabView 翻页（只读，不改判断） |
+| 自动播放 | 视频、Live 都会，进场播一次 | 同左 | 同左 |
+| 声音 | 默认静音，喇叭切换，**视频与 Live 共用一个状态** | 同左 | 同左 |
+| 重播 | Live 点 LIVE 胶囊；视频点播放键 | 同左 | 同左 |
+| 判断进度 | `TriageProgressStore` 按 tab 记 id | 按分类记 id（与清理页同一分类共用） | 不记（按点击的那张打开） |
+
+**Live 的播放口径**：`PHLivePhotoView.startPlayback(with: .full)` 播完自然停在结尾、不循环；只有当前页装载，翻走释放。自动播放只在「装好时仍在这一页」才发生——iCloud 取图要几秒，用户早划走了就不该突然动起来。
+
+**进度为什么存 id 不存下标**：列表会缩（删照片）、会有新照片按时间插到最前、会换筛选。存下标下次会落到一张不相干的照片上；存 id 集合则天然对齐「第一张还没判断过的」。
 
 ## 边界与兜底
 

@@ -258,13 +258,13 @@ struct LivePhotoSurface: UIViewRepresentable {
         // 和这一页的 play 可能落在同一帧里，顺序反了就变成「刚播就停」。
         if c.lastStop != model.stopToken {
             c.lastStop = model.stopToken
-            view.stopPlayback(animated: false)
+            view.stopPlayback()
         }
 
         if c.lastPlay != model.playToken {
             c.lastPlay = model.playToken
             // 先 stop 归零：不加这句，播放中再点会「接着播」而不是从头重播。
-            view.stopPlayback(animated: false)
+            view.stopPlayback()
             view.startPlayback(with: .full)
             DispatchQueue.main.async {
                 self.model.setPlaying(true)
