@@ -247,6 +247,8 @@ final class AnalysisEngine {
         var duplicateGroups: [PhotoGroup]
         var similarGroups: [PhotoGroup]
         var memberIDs: Set<String>
+        /// 看着像重复、但原图在 iCloud 上没核对过的组（1.5(30) A 方案）
+        var pendingVerify: [PendingDuplicateGroup]
     }
 
     private func groupPass(
@@ -254,11 +256,16 @@ final class AnalysisEngine {
         progress: @escaping (Int, Int, String) -> Void,
         total: Int
     ) -> Grouped {
-        progress(total, total, "正在核对完全重复（读取原图，稍慢）")
+        progress(total, total, "正在核对完全重复（只看本机已有的原图）")
         let exact = self.findExactGroups(items: items, progress: progress, total: total)
         progress(total, total, "正在比对相似照片")
         let similar = self.findSimilarGroups(items: items, excluding: exact.memberIDs)
-        return Grouped(duplicateGroups: exact.groups, similarGroups: similar, memberIDs: exact.memberIDs)
+        return Grouped(
+            duplicateGroups: exact.groups,
+            similarGroups: similar,
+            memberIDs: exact.memberIDs,
+            pendingVerify: exact.pending
+        )
     }
 
     private func assemble(
@@ -324,6 +331,7 @@ final class AnalysisEngine {
         result.videoCount = scored.filter { $0.isVideo }.count
         result.duplicateGroups = self.applyScores(dupGroups, scores)
         result.similarGroups = self.applyScores(simGroups, scores)
+        result.unverifiedExactGroups = grouped.pendingVerify
 
         // 候选池放宽一档，界面上的「宽松/标准/严格」再从这个池子里筛，改灵敏度不用重扫
         result.blurryItems = scored.filter { item in
@@ -902,36 +910,56 @@ final class AnalysisEngine {
 
     // MARK: - 完全重复：原图 SHA-256 逐一核对
 
+    /// 读一张本地原图的哈希，三种结果分开走。
+    private enum HashResult {
+        case hex(String)
+        /// 本地没有，原图在 iCloud —— 扫描阶段**不下载**
+        case cloud
+        /// 文件坏了 / 读不到
+        case unavailable
+    }
+
     private func findExactGroups(
         items: [PhotoItem],
         progress: @escaping (Int, Int, String) -> Void,
         total: Int
-    ) -> (groups: [PhotoGroup], memberIDs: Set<String>) {
+    ) -> (groups: [PhotoGroup], memberIDs: Set<String>, pending: [PendingDuplicateGroup]) {
 
         let photos = items.filter { !$0.isVideo && $0.dHash != nil }
-        guard photos.count > 1 else { return ([], []) }
+        guard photos.count > 1 else { return ([], [], []) }
 
         var uf = UnionFind(photos.count)
+        /// 只用来装「看着一样、但本地没有原图」的候选对。
+        /// 和 `uf` 分开：这里的结论只是线索，不能并进「完全重复」。
+        var pendingUF = UnionFind(photos.count)
         var hashCache: [Int: String] = [:]
         var attempted = Set<Int>()
         var hashedCount = 0
+        var cloudCount = 0
 
-        // 读原图算 SHA-256（同一张只算一次）
-        func sha(_ i: Int) -> String? {
-            if let cached = hashCache[i] { return cached }
-            if attempted.contains(i) { return nil }
+        // 读原图算 SHA-256（同一张只算一次）。
+        // ⚠️ 1.5(30) 起**不传 allowNetwork**：扫描全程只用本机已有的原图。
+        // 用户选的是 A 方案——宁可少判几组重复，也不在扫描时偷偷下几个 GB。
+        func hash(_ i: Int) -> HashResult {
+            if let cached = hashCache[i] { return .hex(cached) }
+            if attempted.contains(i) { return .unavailable }
             attempted.insert(i)
 
-            guard let data = PhotoLibraryService.shared.originalData(of: photos[i].asset) else {
-                return nil
+            switch PhotoLibraryService.shared.originalBytes(of: photos[i].asset) {
+            case .data(let data):
+                let hex = PhotoLibraryService.shared.sha256Hex(data)
+                hashCache[i] = hex
+                hashedCount += 1
+                if hashedCount % 5 == 0 {
+                    progress(total, total, "正在核对完全重复（已读 \(hashedCount) 张本机原图）")
+                }
+                return .hex(hex)
+            case .needsCloud:
+                cloudCount += 1
+                return .cloud
+            case .unavailable:
+                return .unavailable
             }
-            let hex = PhotoLibraryService.shared.sha256Hex(data)
-            hashCache[i] = hex
-            hashedCount += 1
-            if hashedCount % 5 == 0 {
-                progress(total, total, "正在核对完全重复（已读 \(hashedCount) 张原图）")
-            }
-            return hex
         }
 
         for bucket in candidateBuckets(photos) where bucket.count > 1 {
@@ -950,7 +978,17 @@ final class AnalysisEngine {
                     if pi.fileSize > 0 && pj.fileSize > 0 && pi.fileSize != pj.fileSize {
                         continue
                     }
-                    guard let si = sha(i), let sj = sha(j), si == sj else { continue }
+
+                    // 两张都先取一次结果：哪怕 i 读不到，j 也可能在云上，
+                    // 这一对仍然值得记成「待核对」。
+                    let si = hash(i)
+                    let sj = hash(j)
+
+                    if case .cloud = si { pendingUF.union(i, j); continue }
+                    if case .cloud = sj { pendingUF.union(i, j); continue }
+                    guard case .hex(let hiHex) = si, case .hex(let hjHex) = sj, hiHex == hjHex else {
+                        continue
+                    }
                     uf.union(i, j)
                 }
             }
@@ -980,7 +1018,68 @@ final class AnalysisEngine {
             let tb = b.items.first?.creationDate ?? .distantPast
             return ta > tb
         }
-        return (groups, memberIDs)
+
+        // 待核对的组：已经在「确认重复」里的成员不再重复展示，
+        // 否则同一张照片会同时出现在「重复」和「待核对」两栏里，看着像两件事。
+        var pendingByRoot: [Int: [Int]] = [:]
+        for i in 0..<photos.count {
+            pendingByRoot[pendingUF.find(i), default: []].append(i)
+        }
+        var pending: [PendingDuplicateGroup] = []
+        for (_, idxs) in pendingByRoot where idxs.count > 1 {
+            let members = idxs.map { photos[$0] }
+            if members.contains(where: { memberIDs.contains($0.id) }) { continue }
+            pending.append(PendingDuplicateGroup(items: members))
+        }
+        pending.sort { a, b in
+            let ta = a.items.first?.creationDate ?? .distantPast
+            let tb = b.items.first?.creationDate ?? .distantPast
+            return ta > tb
+        }
+        if cloudCount > 0 {
+            NSLog("[PhotoOrganizer] 有 %d 张候选原图在 iCloud，已跳过（扫描不联网）", cloudCount)
+        }
+        return (groups, memberIDs, pending)
+    }
+
+    /// 用户主动点「联网核对」之后才走这里：真的把原图从 iCloud 拉下来算 SHA-256。
+    ///
+    /// 单独一个方法、参数里带 `progress`，是为了让界面能显示「正在下载 x/y」并允许中断
+    /// （调用方在后台队列跑，中断靠不再发起下一组来自然结束）。
+    /// 返回的是**核对成立**的组；不成立的（看着像、字节不同）直接丢掉。
+    func verifyPendingDuplicates(
+        _ pending: [PendingDuplicateGroup],
+        progress: ((Int, Int) -> Void)? = nil
+    ) -> [PhotoGroup] {
+        let total = pending.count
+        var confirmed: [PhotoGroup] = []
+
+        for (index, group) in pending.enumerated() {
+            progress?(index, total)
+            var byHash: [String: [PhotoItem]] = [:]
+            for item in group.items {
+                guard case .data(let data) = PhotoLibraryService.shared.originalBytes(of: item.asset, allowNetwork: true) else {
+                    continue
+                }
+                let hex = PhotoLibraryService.shared.sha256Hex(data)
+                byHash[hex, default: []].append(item)
+            }
+            for (_, members) in byHash where members.count > 1 {
+                confirmed.append(PhotoGroup(items: members, isExactDuplicate: true))
+            }
+        }
+        progress?(total, total)
+        confirmed.sort { a, b in
+            let ta = a.items.first?.creationDate ?? .distantPast
+            let tb = b.items.first?.creationDate ?? .distantPast
+            return ta > tb
+        }
+        return confirmed
+    }
+
+    /// 待核对涉及多少张原图。界面用它算「要下载多少张」。
+    func pendingDownloadCount(_ pending: [PendingDuplicateGroup]) -> Int {
+        pending.reduce(0) { $0 + $1.items.count }
     }
 
     // MARK: - 相似：星型聚类（不做传递合并）
@@ -1153,7 +1252,11 @@ final class AnalysisEngine {
 
 // MARK: - 并查集
 
-private struct UnionFind {
+/// 并查集。
+///
+/// **不是 `private`**：单元测试要直接验证「三张互相接近的照片会并成一组」
+/// 这类传递性行为，用公开接口只能间接推断，测不出根因。
+struct UnionFind {
     private var parent: [Int]
     private var rank: [Int]
 

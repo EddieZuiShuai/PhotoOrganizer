@@ -202,11 +202,33 @@ struct PhotoGroup: Identifiable {
     }
 }
 
+/// 「看起来一模一样，但原图还在 iCloud，没核对过」的一组照片。
+///
+/// 1.5(30) 起扫描**不再联网**（用户选的 A 方案）：本地没有原图时只做外观比对
+/// （dHash 极近 + 文件大小相同），**不下「完全重复」的结论**，也不进建议删除。
+/// 它只是一个「待核对」的线索，用户点了「联网核对」才真的下载原图算 SHA-256。
+///
+/// 为什么要把这件事单独列出来：以前这种情况直接跳过，用户看到的是「重复 0 组」，
+/// 以为相册很干净；实际上只是没联网看。宁可显示「有 3 组待核对」，也不能默认没问题。
+struct PendingDuplicateGroup: Identifiable {
+    let items: [PhotoItem]
+
+    var id: String {
+        return "pending-" + (items.first?.id ?? "empty")
+    }
+
+    /// 核对要下载的原图数量（这里就是成员数，每个人都要下）
+    var downloadCount: Int { items.count }
+}
+
 /// 全量分析结果
 struct AnalysisResult {
     var items: [PhotoItem] = []
     var duplicateGroups: [PhotoGroup] = []
     var similarGroups: [PhotoGroup] = []
+    /// 看着像完全重复、但原图在 iCloud 上没核对过的组（1.5(30) A 方案）。
+    /// 不参与建议删除，只在清理页顶部提示「有 N 组待核对」。
+    var unverifiedExactGroups: [PendingDuplicateGroup] = []
     var blurryItems: [PhotoItem] = []
     var screenshotItems: [PhotoItem] = []
     var videoCount: Int = 0

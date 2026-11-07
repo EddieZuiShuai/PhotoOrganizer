@@ -649,15 +649,17 @@ struct ResultView: View {
     /// 表现就是「第一次点开照片永远是空白页」。
     @State private var previewTarget: PreviewTarget?
 
-    @State private var message: String?
     @State private var toast: String?
 
     /// 一次选中太多张时先问一句。
     /// 起因：建议清理页右上角点一下「全选 2779」，底部按钮立刻变成「删除 2779 张」，
     /// 中间没有任何缓冲；而建议里本来就混着误判，点错的代价太大。
     @State private var bulkConfirm: BulkConfirm?
-    /// 隐私页签里点「隐藏」的二次确认。隐藏会让人找不着照片，值得多问一句。
-    @State private var confirmHide = false
+    /// 「看着像重复、但原图在 iCloud」的组。扫描时只做外观比对，不下载；
+    /// 用户点「联网核对」才真的拉原图算 SHA-256（1.5(30) A 方案）。
+    @State private var pendingVerifyGroups: [PendingDuplicateGroup] = []
+    @State private var confirmVerify = false
+    @State private var verifying = false
     /// 超过这个数量才拦。几十张的批量操作不值得多弹一次框。
     private let bulkConfirmThreshold = 500
 
@@ -788,19 +790,17 @@ struct ResultView: View {
         .overlay {
             compressingOverlay
         }
-        .alert("出错了", isPresented: Binding(
-            get: { message != nil },
-            set: { if !$0 { message = nil } }
-        )) {
-            Button("知道了", role: .cancel) { message = nil }
-        } message: {
-            Text(message ?? "")
-        }
-        .alert("隐藏这 \(selectedIDs.count) 项？", isPresented: $confirmHide) {
+        // 失败一律走底部一行字（`showToast`），不再弹「出错了」。
+        // 弹窗会打断操作、要再点一次「知道了」，而失败原因往往只是「系统忙，再点一次」。
+        .confirmationDialog(
+            "联网核对 \(pendingVerifyGroups.count) 组？",
+            isPresented: $confirmVerify,
+            titleVisibility: .visible
+        ) {
+            Button("开始核对（会联网）") { runDuplicateVerify() }
             Button("取消", role: .cancel) {}
-            Button("隐藏") { hideSelected() }
         } message: {
-            Text("它们会被移到系统「已隐藏」相簿，并从本 App 里消失，打开要 Face ID。注意：iOS 16 起 App 读不到那个相簿，**取消隐藏只能去「照片」App 手动操作**。")
+            Text("会从 iCloud 下载 \(pendingVerifyDownloadCount) 张原图来比对。扫描本身从不联网，这一步只在你点了才发生。")
         }
         .confirmationDialog(
             "压缩这段视频？",
@@ -829,7 +829,7 @@ struct ResultView: View {
                 startIndex: target.startIndex,
                 selectedIDs: $selectedIDs,
                 isPrivacy: isPrivacyTab,
-                onHide: { item in hideOne(item) }
+                onHide: { item, done in hideOne(item, completion: done) }
             ) { item in
                 deleteItems([item])
             }
@@ -1957,24 +1957,13 @@ struct ResultView: View {
                 }
                 .padding(16)
             } else {
-                // 隐私页签里「删除」和「隐藏」并排，先把区别写出来再让用户点。
-                if isPrivacyTab {
-                    Text("「删除」会进最近删除；「隐藏」只是挪进系统相簿，照片还在")
-                        .font(.system(size: 10.5))
-                        .foregroundColor(.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 10)
-                }
-
                 HStack(spacing: 10) {
                     Button {
                         selectedIDs.removeAll()
                     } label: {
                         // 只写「取消」两个字，用户会分不清「取消本次操作」还是「取消这些选中」。
                         // 把数量写进去，按钮自己就说明了会发生什么。
-                        // 隐私页签多一颗「隐藏」，横排放不下三段长文案，这里缩成「取消」。
-                        Text(isPrivacyTab ? "取消" : "取消选中 \(selectedIDs.count) 张")
+                        Text("取消选中 \(selectedIDs.count) 张")
                             .font(.system(size: 15))
                             .foregroundColor(.primary)
                             .frame(maxWidth: .infinity)
@@ -1984,21 +1973,6 @@ struct ResultView: View {
                     }
                     // 文案会变（带数量），测试不能按文字点。给一个稳定标识，改文案不牵连用例。
                     .accessibilityIdentifier("action-clear-selection")
-
-                    if isPrivacyTab {
-                        Button {
-                            confirmHide = true
-                        } label: {
-                            Text("隐藏 \(selectedIDs.count)")
-                                .font(.system(size: 15, weight: .medium))
-                                .foregroundColor(.primary)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 13)
-                                .background(Color.black.opacity(0.08))
-                                .cornerRadius(10)
-                        }
-                        .accessibilityIdentifier("action-hide-selected")
-                    }
 
                     Button {
                         performDelete()
@@ -2088,27 +2062,16 @@ struct ResultView: View {
         reallyDelete()
     }
 
-    /// 隐藏选中的隐私条目。隐藏 ≠ 删除：照片还在相册里，只是进了系统「已隐藏」。
-    private func hideSelected() {
-        let chosen = selectedIDs.compactMap { itemIndex[$0] }
-        guard !chosen.isEmpty else { return }
-        PhotoLibraryService.shared.setHidden(true, assets: chosen.map { $0.asset }) { success, error in
-            DispatchQueue.main.async {
-                if success {
-                    hiddenIDs.formUnion(chosen.map { $0.id })
-                    selectedIDs.subtract(Set(chosen.map { $0.id }))
-                    noteHiddenCount(chosen.count)
-                    showToast("已隐藏 \(chosen.count) 张 · 取消隐藏要去「照片」App 的「已隐藏」")
-                } else {
-                    message = "隐藏失败：" + friendlyPhotoError(error)
-                }
-            }
-        }
-    }
-
-    /// 单张隐藏（大图预览里左下角那颗「隐藏」）。
-    /// 和批量那条逻辑一样，只是没有选中集合可减，改成按这一张更新。
-    private func hideOne(_ item: PhotoItem) {
+    /// 单张隐藏（大图预览里那颗「隐藏」）。
+    ///
+    /// 1.5(30) 起**只有这一条路**：底栏的批量「隐藏 N 张」按用户要求去掉了。
+    /// 原因很直接——底栏是「选中 → 执行一个动作」，同时摆着「删除」和「隐藏」，
+    /// 用户会问「我明明标的是待删，为什么还能隐藏」。两个后果差太远（一个进最近删除
+    /// 能恢复，一个挪进系统相簿且在 App 里回不来），不该并排。
+    ///
+    /// `completion` 把结果回给大图预览：成功就关掉这张，失败就在预览顶部浮一行字。
+    /// 用回调而不是直接改父视图的 toast——预览是全屏 cover，父视图的 toast 被盖住了。
+    private func hideOne(_ item: PhotoItem, completion: @escaping (Bool, String?) -> Void) {
         PhotoLibraryService.shared.setHidden(true, assets: [item.asset]) { success, error in
             DispatchQueue.main.async {
                 if success {
@@ -2116,8 +2079,9 @@ struct ResultView: View {
                     selectedIDs.remove(item.id)
                     noteHiddenCount(1)
                     showToast("已隐藏 1 张 · 取消隐藏要去「照片」App 的「已隐藏」")
+                    completion(true, nil)
                 } else {
-                    message = "隐藏失败：" + friendlyPhotoError(error)
+                    completion(false, friendlyPhotoError(error))
                 }
             }
         }
@@ -2144,7 +2108,7 @@ struct ResultView: View {
                     selectedIDs.subtract(Set(items.map { $0.id }))
                     showToast("已删除 \(items.count) 张 · 30 天内在「最近删除」可恢复")
                 } else {
-                    message = "删除失败：" + friendlyPhotoError(error)
+                    showToast("没删掉 · " + friendlyPhotoError(error))
                 }
             }
         }
@@ -2234,7 +2198,7 @@ struct ResultView: View {
                     showToast(text)
                 }
             case .failure(let error):
-                message = "压缩失败：" + friendlyPhotoError(error)
+                showToast("没压成 · " + friendlyPhotoError(error))
             }
         }
     }
@@ -2983,10 +2947,8 @@ struct CategoryDetailView: View {
     @State private var selected: Set<String> = []
     @State private var previewTarget: PreviewTarget?
     @State private var triage: TriageRequest?
-    @State private var message: String?
     @State private var toast: String?
     @State private var videoFilter: VideoSizeFilter = .all
-    @State private var confirmHide = false
     /// 同 `ResultView`：入口那行「已看 N · 继续」要能跟着重置立刻更新。
     @ObservedObject private var triageProgress = TriageProgressStore.shared
 
@@ -3118,27 +3080,14 @@ struct CategoryDetailView: View {
                     .allowsHitTesting(false)
             }
         }
-        .alert("隐藏这 \(selected.count) 项？", isPresented: $confirmHide) {
-            Button("取消", role: .cancel) {}
-            Button("隐藏") { hideSelected() }
-        } message: {
-            Text("它们会被移到系统「已隐藏」相簿，并从本 App 里消失，打开要 Face ID。注意：iOS 16 起 App 读不到那个相簿，**取消隐藏只能去「照片」App 手动操作**。")
-        }
-        .alert("出错了", isPresented: Binding(
-            get: { message != nil },
-            set: { if !$0 { message = nil } }
-        )) {
-            Button("知道了", role: .cancel) { message = nil }
-        } message: {
-            Text(message ?? "")
-        }
+        // 失败走底部一行字，不弹窗（1.5(30) 统一口径）。批量隐藏已移除，这里不再有隐藏确认。
         .fullScreenCover(item: $previewTarget) { target in
             PhotoPreviewView(
                 items: target.items,
                 startIndex: target.startIndex,
                 selectedIDs: $selected,
                 isPrivacy: category.isPrivacy,
-                onHide: { item in hideOne(item) }
+                onHide: { item, done in hideOne(item, completion: done) }
             ) { item in
                 delete([item])
             }
@@ -3182,17 +3131,6 @@ struct CategoryDetailView: View {
 
     private var deleteBar: some View {
         VStack(spacing: 0) {
-            // 选中之后「删除」和「隐藏」并排，用户会问「到底是要删还是要藏」。
-            // 一句话把两个动作的区别摆出来，比改按钮文案省地方。
-            if category.isPrivacy {
-                Text("「删除」会进最近删除；「隐藏」只是挪进系统相簿，照片还在")
-                    .font(.system(size: 10.5))
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 8)
-            }
-
             HStack(spacing: 8) {
                 Button {
                     selected.removeAll()
@@ -3204,24 +3142,6 @@ struct CategoryDetailView: View {
                 .buttonStyle(.plain)
 
                 Spacer(minLength: 4)
-
-                // 隐藏只对隐私组出现：这里误点一次就是把照片从 App 里「弄丢」，
-                // 普通分类里放这颗按钮没有意义，只会增加误触。
-                if category.isPrivacy {
-                    Button {
-                        confirmHide = true
-                    } label: {
-                        Text("隐藏 \(selected.count)")
-                            .font(.system(size: 14, weight: .medium))
-                            .foregroundColor(.primary)
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 9)
-                            .background(Color.black.opacity(0.06))
-                            .cornerRadius(9)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityIdentifier("category-hide")
-                }
 
                 Button {
                     let chosen = alive.filter { selected.contains($0.id) }
@@ -3275,27 +3195,7 @@ struct CategoryDetailView: View {
                     selected.subtract(Set(chosen.map { $0.id }))
                     showToast("已删除 \(chosen.count) 项 · 30 天内在「最近删除」可恢复")
                 } else {
-                    message = "删除失败：" + friendlyPhotoError(error)
-                }
-            }
-        }
-    }
-
-    /// 隐藏 ≠ 删除：照片还在相册里，只是进了系统「已隐藏」相簿。
-    /// 所以这里记进 `hiddenIDs` 而不是 `deletedIDs`——后者会被「空间」页
-    /// 当成已释放的空间算进去，那是在骗人。
-    private func hideSelected() {
-        let chosen = alive.filter { selected.contains($0.id) }
-        guard !chosen.isEmpty else { return }
-        PhotoLibraryService.shared.setHidden(true, assets: chosen.map { $0.asset }) { success, error in
-            DispatchQueue.main.async {
-                if success {
-                    hiddenIDs.formUnion(chosen.map { $0.id })
-                    selected.subtract(Set(chosen.map { $0.id }))
-                    noteHiddenCount(chosen.count)
-                    showToast("已隐藏 \(chosen.count) 项 · 取消隐藏要去「照片」App 的「已隐藏」")
-                } else {
-                    message = "隐藏失败：" + friendlyPhotoError(error)
+                    showToast("没删掉 · " + friendlyPhotoError(error))
                 }
             }
         }
@@ -3308,8 +3208,12 @@ struct CategoryDetailView: View {
         }
     }
 
-    /// 单张隐藏（大图预览里那颗「隐藏」）。批量那条走 `hideSelected`。
-    private func hideOne(_ item: PhotoItem) {
+    /// 单张隐藏（大图预览里那颗「隐藏」）。
+    ///
+    /// 1.5(30) 起**只有这一条路**：底栏的批量「隐藏 N 项」按用户要求去掉了，
+    /// 和清理页同一个理由——「删除」和「隐藏」两个后果差太远，不该并排。
+    /// `completion` 把结果回给大图预览：成功就关掉这张，失败就在预览顶部浮一行字。
+    private func hideOne(_ item: PhotoItem, completion: @escaping (Bool, String?) -> Void) {
         PhotoLibraryService.shared.setHidden(true, assets: [item.asset]) { success, error in
             DispatchQueue.main.async {
                 if success {
@@ -3317,8 +3221,9 @@ struct CategoryDetailView: View {
                     selected.remove(item.id)
                     noteHiddenCount(1)
                     showToast("已隐藏 1 项 · 取消隐藏要去「照片」App 的「已隐藏」")
+                    completion(true, nil)
                 } else {
-                    message = "隐藏失败：" + friendlyPhotoError(error)
+                    completion(false, friendlyPhotoError(error))
                 }
             }
         }

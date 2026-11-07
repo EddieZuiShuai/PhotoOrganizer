@@ -193,36 +193,55 @@ final class PhotoLibraryService {
 
     // MARK: - 原图数据 / 哈希
 
+    /// 读原图字节之后拿到的三种结果。
+    ///
+    /// 为什么必须把「云端」单独拆成一类，而不是统一返回 `nil`：
+    /// 1.5(30) 起扫描**不再联网**（用户选了 A 方案），所以「本地没有原图」必须
+    /// 能跟「这张文件坏了」区分开——前者是正常的（照片在 iCloud 里），
+    /// 应该显示成「疑似重复，待核对」，后者才该当作读不到。
+    enum OriginalBytes {
+        /// 本地有原图，拿到了字节
+        case data(Data)
+        /// 本地没有，原图在 iCloud 上（`PHImageResultIsInCloudKey == true`）
+        case needsCloud
+        /// 其他原因读不到（文件损坏、格式不支持、资源被占用）
+        case unavailable
+    }
+
     /// 读取照片原始文件数据（用于算「完全重复」的字节哈希）。
-    /// 注意：这一步是真实读盘，只对候选照片调用。
-    func originalData(of asset: PHAsset) -> Data? {
-        let resources = PHAssetResource.assetResources(for: asset)
-        let candidate = resources.first(where: { $0.type == .photo || $0.type == .fullSizePhoto })
-            ?? resources.first(where: { $0.type != .pairedVideo })
-        guard let resource = candidate else { return nil }
+    ///
+    /// - Parameter allowNetwork: **默认 `false`**。扫描全程不联网：两万张照片里
+    ///   哪怕只有几百张候选，一张原图 2~75 MB，几轮下来就是几个 GB 的流量，
+    ///   而且 iCloud 下载会临时占掉本机空间、挤压系统「优化版」缓存。
+    ///   只有用户主动点「联网核对」那一次才传 `true`。
+    ///
+    /// 这里用 `requestImageDataAndOrientation` 而不是 `PHAssetResourceManager`：
+    /// 只有前者会在 info 里回 `PHImageResultIsInCloudKey`，能明确告诉我们
+    /// 「不是文件坏了，是图还在云上」。
+    func originalBytes(of asset: PHAsset, allowNetwork: Bool = false) -> OriginalBytes {
+        let options = PHImageRequestOptions()
+        options.isSynchronous = true
+        options.deliveryMode = .highQualityFormat
+        options.version = .current
+        options.isNetworkAccessAllowed = allowNetwork
 
-        let options = PHAssetResourceRequestOptions()
-        options.isNetworkAccessAllowed = true
-
-        var data = Data()
-        var failure = false
-        let sem = DispatchSemaphore(value: 0)
-
-        PHAssetResourceManager.default().requestData(
-            for: resource,
-            options: options,
-            dataReceivedHandler: { chunk in
-                data.append(chunk)
-            },
-            completionHandler: { error in
-                failure = (error != nil)
-                sem.signal()
+        var payload: Data?
+        var inCloud = false
+        PHImageManager.default().requestImageDataAndOrientation(for: asset, options: options) { data, _, _, info in
+            payload = data
+            if let flag = info?[PHImageResultIsInCloudKey] as? Bool, flag {
+                inCloud = true
             }
-        )
-        sem.wait()
+        }
 
-        if failure || data.isEmpty { return nil }
-        return data
+        if let data = payload, !data.isEmpty {
+            return .data(data)
+        }
+        // 允许联网还拿不到，说明不是「在云上」这么简单，按不可用处理
+        if inCloud && !allowNetwork {
+            return .needsCloud
+        }
+        return .unavailable
     }
 
     /// SHA-256（十六进制字符串）
@@ -317,32 +336,13 @@ final class PhotoLibraryService {
             completion(true, nil)
             return
         }
-        apply(hidden, assets: assets, retried: false, completion: completion)
-    }
-
-    /// `PHPhotosError.userCancelled`（3072）。真机实测会**偶发**出现：
-    /// 相册正好在忙（iCloud 同步、刚从后台回来、系统弹窗被划掉）时，
-    /// 这次 `performChanges` 会被判成「用户取消」，什么都没改。
-    /// 这种错重试一次基本就过了，别直接甩给用户看。
-    private static let userCancelledCode = 3072
-
-    private func apply(_ hidden: Bool, assets: [PHAsset], retried: Bool,
-                       completion: @escaping (Bool, Error?) -> Void) {
         PHPhotoLibrary.shared().performChanges({
             for asset in assets {
                 // 当前 SDK 里 `PHAssetChangeRequest(for:)` 是非可选的（老文档写的是 `init?`，
                 // 照抄会编译报错：cannot use optional chaining on non-optional value）
                 PHAssetChangeRequest(for: asset).isHidden = hidden
             }
-        }, completionHandler: { [weak self] success, error in
-            let code = (error as NSError?)?.code ?? 0
-            if !success, !retried, code == PhotoLibraryService.userCancelledCode {
-                NSLog("[PhotoOrganizer] 隐藏被判成 userCancelled(3072)，200ms 后重试一次")
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) {
-                    self?.apply(hidden, assets: assets, retried: true, completion: completion)
-                }
-                return
-            }
+        }, completionHandler: { success, error in
             if !success, let error = error {
                 NSLog("[PhotoOrganizer] 隐藏失败：%@", String(describing: error))
             }
@@ -505,34 +505,38 @@ enum DebugSelfCheck {
 /// 规矩：**永远不要把 `PHPhotosErrorDomain 错误 3072` 这种东西甩到界面上**。
 /// 用户看不懂，还会以为 App 坏了。原始错误进 `NSLog`，界面只说「发生了什么、该怎么办」。
 ///
+/// 文案标准：**一句话，不超过 30 个字**。它显示在底部一行小字里、3 秒后自己消失，
+/// 写长了根本读不完。所以这里不解释原理，只说「怎么办」。
+///
 /// 已知的几条（都是真机上遇到过的）：
 /// - 3072 `userCancelled`：相册忙 / 刚从后台回来 / 系统弹窗被划掉，操作被系统判成"取消"。
-///   只是这一次没成，重试就行（`setHidden` 里已经自动重试过一次）。
+///   **不自动重试**（1.5(30) 按用户要求去掉）：重试会再弹一次系统确认，
+///   用户被迫连点两次「不允许」，比失败本身更让人困惑。
 /// - 3303：原图还在 iCloud，本地没有，联网后重试。
 /// - 3142 / 3102：这张正被别的 App 占用，或者资源不可用。
 func friendlyPhotoError(_ error: Error?) -> String {
     guard let error = error else {
-        return "这次没成功，再试一次就好。"
+        return "这次没成，再点一次就好"
     }
     let ns = error as NSError
     // PhotoKit 的错误都挂在 PHPhotosErrorDomain 下，code 才是真正的原因。
     if ns.domain == "PHPhotosErrorDomain" {
         switch ns.code {
         case 3072:
-            return "系统把这次操作取消了（切到别的 App、或者系统弹窗被关掉都会这样），再试一次就好。"
+            return "系统把这次操作取消了，再点一次就好"
         case 3303:
-            return "这张的原图还在 iCloud 上，本地没有。连上网再试一次。"
+            return "原图还在 iCloud，连上网再试"
         case 3142, 3102, 3101:
-            return "这张暂时改不动，可能正被别的 App 用着。稍等一下再试。"
+            return "这张正被别的 App 用着，等一下再试"
         default:
             NSLog("[PhotoOrganizer] 未翻译的相册错误：code=%d %@", ns.code, ns.localizedDescription)
-            return "这次没成功，再试一次就好。如果一直不行，重启一下 App。"
+            return "这次没成，再点一次就好"
         }
     }
     if ns.domain == "AVFoundationErrorDomain" || ns.domain == NSCocoaErrorDomain {
         NSLog("[PhotoOrganizer] 未翻译的系统错误：%@ code=%d", ns.domain, ns.code)
-        return "这次没成功，再试一次就好。"
+        return "这次没成，再点一次就好"
     }
     NSLog("[PhotoOrganizer] 未知错误：%@", String(describing: ns))
-    return "这次没成功，再试一次就好。"
+    return "这次没成，再点一次就好"
 }
