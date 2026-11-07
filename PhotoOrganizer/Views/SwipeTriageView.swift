@@ -2,6 +2,7 @@ import SwiftUI
 import Photos
 import UIKit
 import AVFoundation
+import Combine
 
 // MARK: - 打开逐张过的请求（用 item 驱动 sheet，避免快照捕获旧数据）
 
@@ -31,8 +32,16 @@ struct TriageRequest: Identifiable {
 ///
 /// **待删标记必须一起存**：只存 judged 的话，一张标了待删的照片重启后会变成
 /// 「判过了但标记没了」——既不会重看，也不会被删，等于彻底漏掉。
-final class TriageProgressStore {
+///
+/// **必须是 `ObservableObject`**：入口那条「已看 N · 继续」（`TriageEntryBar`）读的是
+/// `judgedCount`，它是个普通 getter，没有发布机制。1.5(28) 之前这里少了一层通知，
+/// 于是「从头再筛一遍」清空进度、退出后入口还挂着旧的「已看 7」——用户看到的就是
+/// 「刚重置过怎么还是 7」。`revision` 只在写操作里 +1，视图订阅它就够了。
+final class TriageProgressStore: ObservableObject {
     static let shared = TriageProgressStore()
+
+    /// 任何会影响「已看多少 / 标了哪些」的改动都 +1，让订阅方重算。
+    @Published private(set) var revision = 0
 
     private struct Entry: Codable {
         var judged: [String]
@@ -96,6 +105,7 @@ final class TriageProgressStore {
         entry.updatedAt = Date()
         entries[key] = entry
         scheduleSave()
+        revision &+= 1
     }
 
     /// 照片真删掉了，进度里也别留着它们的 id
@@ -107,6 +117,7 @@ final class TriageProgressStore {
         entry.updatedAt = Date()
         entries[key] = entry
         scheduleSave()
+        revision &+= 1
     }
 
     /// 撤销：这一张要重新判断。只删标记不够，还得把「判过」的记录退回去，
@@ -118,11 +129,13 @@ final class TriageProgressStore {
         entry.updatedAt = Date()
         entries[key] = entry
         scheduleSave()
+        revision &+= 1
     }
 
     func clear(key: String) {
         guard entries.removeValue(forKey: key) != nil else { return }
         scheduleSave()
+        revision &+= 1
     }
 
     // MARK: 落盘
@@ -435,31 +448,50 @@ struct TriageMedia: View {
             }
 
             if live.isReady {
+                // 位置对齐全屏预览：左下角、和「重播」挨着、给一颗同样大的静音键。
+                // 之前挂在右上角只有 9pt 字、4pt 内边距，真机上按十次中三次（1.5(29) 反馈）。
                 VStack {
-                    HStack {
-                        Spacer()
+                    Spacer(minLength: 0)
+                    HStack(spacing: 10) {
                         Button {
                             live.playOnce()
                         } label: {
-                            HStack(spacing: 3) {
+                            HStack(spacing: 5) {
                                 Image(systemName: "livephoto")
-                                    .font(.system(size: 9, weight: .bold))
+                                    .font(.system(size: 13, weight: .semibold))
                                 Text("LIVE")
-                                    .font(.system(size: 9, weight: .heavy))
-                                    .tracking(0.4)
+                                    .font(.system(size: 10.5, weight: .heavy))
+                                    .tracking(0.6)
                             }
                             .foregroundColor(.white)
-                            .padding(.horizontal, 7)
-                            .padding(.vertical, 4)
-                            .background(Capsule().fill(Color.black.opacity(0.45)))
-                            .overlay(Capsule().stroke(Color.white.opacity(0.5), lineWidth: 0.7))
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .background(Capsule().fill(Color.black.opacity(0.5)))
+                            .overlay(Capsule().stroke(Color.white.opacity(0.55), lineWidth: 0.8))
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel("重播 Live 照片")
+                        .accessibilityIdentifier("triage-live-replay")
+
+                        Button {
+                            live.toggleMute()
+                        } label: {
+                            Image(systemName: live.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundColor(.white)
+                                .frame(width: 40, height: 40)
+                                .background(Circle().fill(Color.black.opacity(0.5)))
+                                .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 0.8))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel(live.isMuted ? "取消静音" : "静音")
+                        .accessibilityIdentifier("triage-live-mute")
+
+                        Spacer(minLength: 0)
                     }
-                    Spacer()
                 }
-                .padding(10)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 16)
             }
         }
     }
@@ -572,25 +604,29 @@ struct TriageMedia: View {
             // 静音开关单独一个角标，避免「怎么没声音」的疑问。
             // 它是「可点区域」之外的独立覆盖层：Button 自己吃掉这次 tap，
             // 不会再同时触发上面那层的播放/暂停（否则点喇叭会先静音→又暂停）。
+            // 位置和 Live 一样挪到左下角，尺寸从 32 放到 40（真机好按）。
             if video.player != nil {
                 VStack {
-                    HStack {
-                        Spacer()
+                    Spacer(minLength: 0)
+                    HStack(spacing: 10) {
                         Button {
                             video.toggleMute()
                         } label: {
                             Image(systemName: video.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-                                .font(.system(size: 12, weight: .semibold))
+                                .font(.system(size: 14, weight: .semibold))
                                 .foregroundColor(.white)
-                                .frame(width: 32, height: 32)
-                                .background(Circle().fill(Color.black.opacity(0.45)))
+                                .frame(width: 40, height: 40)
+                                .background(Circle().fill(Color.black.opacity(0.5)))
+                                .overlay(Circle().stroke(Color.white.opacity(0.35), lineWidth: 0.8))
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(video.isMuted ? "取消静音" : "静音")
+                        .accessibilityIdentifier("triage-video-mute")
+                        Spacer(minLength: 0)
                     }
-                    Spacer()
                 }
-                .padding(10)
+                .padding(.horizontal, 16)
+                .padding(.bottom, 16)
             }
         }
     }
@@ -671,6 +707,8 @@ struct SwipeTriageView: View {
     @State private var confirmReset = false
     /// 进场时跳到的位置。>0 说明这次是「继续上次」
     @State private var resumeFrom: Int
+    /// 是否已经走过 `finish()`。用来避免「点 X 退出」和「下滑关掉」两条路径重复回调。
+    @State private var finished = false
 
     private struct Decision {
         let id: String
@@ -776,6 +814,16 @@ struct SwipeTriageView: View {
             if resumeFrom > 0 {
                 showHint("已看 \(resumeFrom) 张，从第 \(resumeFrom + 1) 张继续")
             }
+        }
+        .onDisappear {
+            // 下滑关掉 sheet 不走 `finish()`，标记会整批丢掉（用户看到的就是
+            // 「明明标了 3 张，回到列表一张都没选上，也没提示」）。补一条同样的收尾，
+            // 让两条退出路径等价。`finished` 保证不会重复回调。
+            guard !finished else { return }
+            finished = true
+            TriageProgressStore.shared.flush()
+            let snapshot = marks
+            DispatchQueue.main.async { onFinish(snapshot) }
         }
         .confirmationDialog(
             "删除已标记的 \(marks.count) 张？",
@@ -975,7 +1023,11 @@ struct SwipeTriageView: View {
                 }
             }
             .foregroundColor(.white)
-            .padding(16)
+            .padding(.horizontal, 16)
+            .padding(.top, 16)
+            // Live / 视频的下半部分让给左下角那排「LIVE + 静音」：
+            // 不留这 44pt，文件名会正好压在按钮上。普通照片保持原来的 16。
+            .padding(.bottom, (item.isLivePhoto || item.isVideo) ? 60 : 16)
             .allowsHitTesting(false)
         }
         .frame(width: width)
@@ -1277,7 +1329,7 @@ struct SwipeTriageView: View {
             DispatchQueue.main.async {
                 busy = false
                 guard ok else {
-                    showHint("隐藏失败：" + (err?.localizedDescription ?? "未知原因"))
+                    showHint("隐藏失败：" + friendlyPhotoError(err))
                     return
                 }
 
@@ -1358,6 +1410,8 @@ struct SwipeTriageView: View {
 
     private func finish() {
         // 退出时兜底落盘：攒 2 秒的那一批可能还没写，用户手快关掉就丢了
+        guard !finished else { return }
+        finished = true
         TriageProgressStore.shared.flush()
         onFinish(marks)
         dismiss()

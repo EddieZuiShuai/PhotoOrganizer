@@ -697,6 +697,9 @@ struct ResultView: View {
     @AppStorage("blurPrivacyThumbnails") private var blurPrivacyThumbnails: Bool = true
     @State private var ignoredBlurIDs: Set<String> = BlurIgnoreStore.shared.all()
     @State private var lastLongPressAt: Date = .distantPast
+    /// 订阅逐张过的进度：入口那行「已看 N · 继续」要跟着「从头再筛一遍」立刻变。
+    /// 只用 `TriageProgressStore.shared.judgedCount(...)` 是拉取式的，清空后没人通知它重算。
+    @ObservedObject private var triageProgress = TriageProgressStore.shared
 
     init(
         result: AnalysisResult,
@@ -824,7 +827,9 @@ struct ResultView: View {
             PhotoPreviewView(
                 items: target.items,
                 startIndex: target.startIndex,
-                selectedIDs: $selectedIDs
+                selectedIDs: $selectedIDs,
+                isPrivacy: isPrivacyTab,
+                onHide: { item in hideOne(item) }
             ) { item in
                 deleteItems([item])
             }
@@ -1166,7 +1171,7 @@ struct ResultView: View {
         if !list.isEmpty {
             TriageEntryBar(
                 count: list.count,
-                judgedCount: TriageProgressStore.shared.judgedCount(for: triageKey)
+                judgedCount: triageProgress.judgedCount(for: triageKey)
             ) {
                 startTriage()
             }
@@ -2095,7 +2100,24 @@ struct ResultView: View {
                     noteHiddenCount(chosen.count)
                     showToast("已隐藏 \(chosen.count) 张 · 取消隐藏要去「照片」App 的「已隐藏」")
                 } else {
-                    message = "隐藏失败：" + (error?.localizedDescription ?? "未知原因")
+                    message = "隐藏失败：" + friendlyPhotoError(error)
+                }
+            }
+        }
+    }
+
+    /// 单张隐藏（大图预览里左下角那颗「隐藏」）。
+    /// 和批量那条逻辑一样，只是没有选中集合可减，改成按这一张更新。
+    private func hideOne(_ item: PhotoItem) {
+        PhotoLibraryService.shared.setHidden(true, assets: [item.asset]) { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    hiddenIDs.insert(item.id)
+                    selectedIDs.remove(item.id)
+                    noteHiddenCount(1)
+                    showToast("已隐藏 1 张 · 取消隐藏要去「照片」App 的「已隐藏」")
+                } else {
+                    message = "隐藏失败：" + friendlyPhotoError(error)
                 }
             }
         }
@@ -2122,7 +2144,7 @@ struct ResultView: View {
                     selectedIDs.subtract(Set(items.map { $0.id }))
                     showToast("已删除 \(items.count) 张 · 30 天内在「最近删除」可恢复")
                 } else {
-                    message = "删除失败：" + (error?.localizedDescription ?? "未知原因")
+                    message = "删除失败：" + friendlyPhotoError(error)
                 }
             }
         }
@@ -2212,7 +2234,7 @@ struct ResultView: View {
                     showToast(text)
                 }
             case .failure(let error):
-                message = "压缩失败：" + error.localizedDescription
+                message = "压缩失败：" + friendlyPhotoError(error)
             }
         }
     }
@@ -2965,6 +2987,8 @@ struct CategoryDetailView: View {
     @State private var toast: String?
     @State private var videoFilter: VideoSizeFilter = .all
     @State private var confirmHide = false
+    /// 同 `ResultView`：入口那行「已看 N · 继续」要能跟着重置立刻更新。
+    @ObservedObject private var triageProgress = TriageProgressStore.shared
 
     private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
 
@@ -3030,7 +3054,7 @@ struct CategoryDetailView: View {
                     // 视频分类带着当前体积筛选——选了「≥100MB」就只过这些。
                     TriageEntryBar(
                         count: alive.count,
-                        judgedCount: TriageProgressStore.shared.judgedCount(for: triageKey)
+                        judgedCount: triageProgress.judgedCount(for: triageKey)
                     ) {
                         triage = TriageRequest(
                             title: category.rawValue,
@@ -3112,7 +3136,9 @@ struct CategoryDetailView: View {
             PhotoPreviewView(
                 items: target.items,
                 startIndex: target.startIndex,
-                selectedIDs: $selected
+                selectedIDs: $selected,
+                isPrivacy: category.isPrivacy,
+                onHide: { item in hideOne(item) }
             ) { item in
                 delete([item])
             }
@@ -3249,7 +3275,7 @@ struct CategoryDetailView: View {
                     selected.subtract(Set(chosen.map { $0.id }))
                     showToast("已删除 \(chosen.count) 项 · 30 天内在「最近删除」可恢复")
                 } else {
-                    message = "删除失败：" + (error?.localizedDescription ?? "未知原因")
+                    message = "删除失败：" + friendlyPhotoError(error)
                 }
             }
         }
@@ -3269,7 +3295,7 @@ struct CategoryDetailView: View {
                     noteHiddenCount(chosen.count)
                     showToast("已隐藏 \(chosen.count) 项 · 取消隐藏要去「照片」App 的「已隐藏」")
                 } else {
-                    message = "隐藏失败：" + (error?.localizedDescription ?? "未知原因")
+                    message = "隐藏失败：" + friendlyPhotoError(error)
                 }
             }
         }
@@ -3279,6 +3305,22 @@ struct CategoryDetailView: View {
         toast = text
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
             if toast == text { toast = nil }
+        }
+    }
+
+    /// 单张隐藏（大图预览里那颗「隐藏」）。批量那条走 `hideSelected`。
+    private func hideOne(_ item: PhotoItem) {
+        PhotoLibraryService.shared.setHidden(true, assets: [item.asset]) { success, error in
+            DispatchQueue.main.async {
+                if success {
+                    hiddenIDs.insert(item.id)
+                    selected.remove(item.id)
+                    noteHiddenCount(1)
+                    showToast("已隐藏 1 项 · 取消隐藏要去「照片」App 的「已隐藏」")
+                } else {
+                    message = "隐藏失败：" + friendlyPhotoError(error)
+                }
+            }
         }
     }
 }
@@ -3509,6 +3551,36 @@ struct SettingsTabView: View {
                     .buttonStyle(.plain)
                     .padding(.vertical, 12)
                     .accessibilityIdentifier("settings-open-permission")
+
+                    divider
+
+                    // iOS **没有**「联网权限」这一项：App 上网不需要授权，系统也不会为访问
+                    // iCloud 弹框。所以这里只能写说明，**绝不能做成开关**——做了就是骗人。
+                    // 但用户会想「给了相册权限，它会不会顺手把照片传走」，这句话放在
+                    // 「系统权限」这一栏里最容易被找到，点进去看完整说明。
+                    Button {
+                        showCloudNotice = true
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("网络")
+                                    .font(.system(size: 15))
+                                    .foregroundColor(.primary)
+                                Text("系统里没有这项授权。本 App 只在取 iCloud 原图时联网，不上传任何照片")
+                                    .font(.system(size: 11.5))
+                                    .foregroundColor(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 12)
+                    .accessibilityIdentifier("settings-cloud-permission")
                 }
 
                 // MARK: 关于
@@ -3947,7 +4019,7 @@ struct HiddenAssetsView: View {
                     assets.removeAll { ids.contains($0.localIdentifier) }
                     selected.removeAll()
                 } else {
-                    message = "取消隐藏失败：" + (error?.localizedDescription ?? "未知原因")
+                    message = "取消隐藏失败：" + friendlyPhotoError(error)
                 }
             }
         }

@@ -667,6 +667,11 @@ struct PhotoPreviewView: View {
     let items: [PhotoItem]
     @Binding var selectedIDs: Set<String>
     let onDelete: (PhotoItem) -> Void
+    /// 隐私组才给「隐藏」。和删除不同，隐藏只是挪进系统「已隐藏」相簿，照片还在。
+    let isPrivacy: Bool
+    /// 真正执行隐藏。放外面做是因为要看隐藏成败再决定 toast，
+    /// 也让清理页和分类页共用同一套落库逻辑。
+    let onHide: ((PhotoItem) -> Void)?
 
     @State private var index: Int
     @StateObject private var video = VideoPlaybackModel()
@@ -674,10 +679,14 @@ struct PhotoPreviewView: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    init(items: [PhotoItem], startIndex: Int, selectedIDs: Binding<Set<String>>, onDelete: @escaping (PhotoItem) -> Void) {
+    init(items: [PhotoItem], startIndex: Int, selectedIDs: Binding<Set<String>>,
+         isPrivacy: Bool = false, onHide: ((PhotoItem) -> Void)? = nil,
+         onDelete: @escaping (PhotoItem) -> Void) {
         self.items = items
         self._selectedIDs = selectedIDs
         self._index = State(initialValue: max(0, min(startIndex, max(0, items.count - 1))))
+        self.isPrivacy = isPrivacy
+        self.onHide = onHide
         self.onDelete = onDelete
     }
 
@@ -939,15 +948,20 @@ struct PhotoPreviewView: View {
     }
 
     private var actionBar: some View {
-        HStack(spacing: 12) {
+        // 隐私组多一颗「隐藏」，一行三颗。文案统一成「待删 / 取消待删」——
+        // 逐张过里那颗也叫「待删」，同一个动作在三个地方必须同名，
+        // 之前这里是「标记待删」，用户以为跟别处不是一回事。
+        HStack(spacing: isPrivacy ? 10 : 12) {
             Button {
                 toggleMark()
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     Image(systemName: marked ? "checkmark.circle.fill" : "circle")
                         .font(.system(size: 15))
-                    Text(marked ? "取消标记" : "标记待删")
+                    Text(marked ? "取消待删" : "待删")
                         .font(.system(size: 14, weight: .medium))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
@@ -962,14 +976,40 @@ struct PhotoPreviewView: View {
             .accessibilityLabel(marked ? "取消标记待删" : "标记待删")
             .accessibilityIdentifier("preview-mark")
 
+            if isPrivacy {
+                Button {
+                    hideNow()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: "eye.slash.fill")
+                            .font(.system(size: 14))
+                        Text("隐藏")
+                            .font(.system(size: 14, weight: .medium))
+                    }
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(
+                        RoundedRectangle(cornerRadius: 11)
+                            .fill(Color.white.opacity(0.14))
+                    )
+                }
+                .buttonStyle(.plain)
+                .disabled(current == nil)
+                .accessibilityLabel("隐藏这张")
+                .accessibilityIdentifier("preview-hide")
+            }
+
             Button {
                 deleteNow()
             } label: {
-                HStack(spacing: 6) {
+                HStack(spacing: 5) {
                     Image(systemName: "trash")
                         .font(.system(size: 14, weight: .semibold))
                     Text("立即删除")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: isPrivacy ? 13 : 14, weight: .semibold))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
                 }
                 .foregroundColor(.white)
                 .frame(maxWidth: .infinity)
@@ -1018,6 +1058,20 @@ struct PhotoPreviewView: View {
         dismiss()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
             onDelete(item)
+        }
+    }
+
+    /// 隐藏当前这张。和「待删」分开：待删是攒着一起删，隐藏是立刻挪进系统相簿。
+    /// 隐藏成功后这张会从 App 的列表里消失，所以直接关掉预览，别停在一个已经不在的条目上。
+    private func hideNow() {
+        guard let item = current, isPrivacy else { return }
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+        video.stop()
+        live.reset()
+        selectedIDs.remove(item.id)
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            onHide?(item)
         }
     }
 
