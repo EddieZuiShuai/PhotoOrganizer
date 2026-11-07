@@ -7,14 +7,12 @@ name: 08 逐张过：连续标记后关掉，标记要带回列表
 - tapOn: "逐张过"
 
 # 同上：有进度先归零，否则会从别的用例留下的位置接着走
-- runFlow:
-    when:
-      visible:
-        id: "triage-reset"
-    commands:
-      - tapOn:
-          id: "triage-reset"
-      - tapOn: "从头开始"
+- tapOn:
+    id: "triage-reset"
+    optional: true
+- tapOn:
+    text: "从头开始"
+    optional: true
 
 - assertVisible: "1 / [0-9]+"
 

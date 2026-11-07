@@ -12,14 +12,12 @@ name: 10 逐张过：进度记忆 + 待删标记恢复
 - tapOn: "逐张过"
 
 # 前面的用例可能留下进度，先归零
-- runFlow:
-    when:
-      visible:
-        id: "triage-reset"
-    commands:
-      - tapOn:
-          id: "triage-reset"
-      - tapOn: "从头开始"
+- tapOn:
+    id: "triage-reset"
+    optional: true
+- tapOn:
+    text: "从头开始"
+    optional: true
 
 - assertVisible: "1 / [0-9]+"
 
