@@ -42,8 +42,8 @@ python watch_build.py --test     # 只测通知通道
 
 | 键 | 当前值 | 说明 |
 |---|---|---|
-| `CFBundleShortVersionString` | `1.4` | 对用户可见的版本 |
-| `CFBundleVersion` | `20` | 构建号，每次装到手机都要 +1，否则 Sideloadly 可能装不上/不覆盖 |
+| `CFBundleShortVersionString` | `1.5` | 对用户可见的版本 |
+| `CFBundleVersion` | `27` | 构建号，每次装到手机都要 +1，否则 Sideloadly 可能装不上/不覆盖 |
 
 > `project.pbxproj` 里的 `MARKETING_VERSION = 1.0` / `CURRENT_PROJECT_VERSION = 3` 是模板残留，**不起作用**（`INFOPLIST_FILE` 指向的 plist 里写了硬编码值，会覆盖它们）。别去改那里。
 
@@ -58,8 +58,8 @@ python watch_build.py --test     # 只测通知通道
 ### `ui-test.yml` — 云端 UI 测试
 
 - 触发：**仅手动**（`workflow_dispatch`）。
-- 流程：选一台最新 iPhone 模拟器 → 编 Debug 模拟器版 → 装 App → 灌 12 张测试图（`UITestFixtures/`）→ 授权 → Maestro 跑 8 条用例 → 传报告与截图。
-- 用例覆盖：启动扫描、跨标签选中、逐张过滑动/撤销、预览标记、全选清空、布局三档、模糊三档、逐张过标记回传。
+- 流程：选一台最新 iPhone 模拟器 → 编 Debug 模拟器版 → 装 App → 灌 12 张测试图（`UITestFixtures/`）→ 授权 → Maestro 跑 11 条用例 → 传报告与截图。
+- 用例覆盖：首启联网说明、启动扫描、跨标签选中、逐张过滑动/撤销、预览标记、全选清空、布局三档、模糊三档、逐张过标记回传、逐张过进度记忆、教程与「网络与 iCloud」重看。
 - 授权顺序是硬要求：`addmedia` → 启动一次 → `grant photos`。**不能** `grant photos-add`（会把权限记成"仅添加"，启动弹框挡住界面）。顺序错了所有用例都会挂在第一步。
 
 ### 本机取回测试结论

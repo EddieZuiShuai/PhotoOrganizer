@@ -1,0 +1,27 @@
+appId: com.eddie.photoorganizer
+name: 00 首启联网说明
+---
+# 为什么排在最前面：这条用例依赖「cloudNoticeSeenVersion 还是空」。
+# Maestro 按文件名顺序跑，00 是第一条，装完第一次启动一定是未看状态。
+# 它只验证弹窗本身，不扫描——扫描留给 01，省一轮三分钟。
+- launchApp
+
+# 卡片必须自己说清楚三件事：下载不是上传、整理不用先下载、识别在本机
+- assertVisible: "为什么需要联网？"
+- assertVisible: "只为了从 iCloud 取回照片，不是上传"
+- assertVisible: "下载，不是上传"
+- assertVisible: "整理不用先下载"
+- assertVisible: "识别全在这台手机上"
+- assertVisible: "断网也能用.*"
+- takeScreenshot: 13_cloud_notice
+
+# 点「我知道了」才关；关掉后首页按钮要能正常点到
+- tapOn:
+    id: "cloud-notice-ok"
+- assertNotVisible: "为什么需要联网？"
+- assertVisible: "开始扫描"
+
+# 再冷启动一次：看过之后不该重复打扰
+- launchApp
+- assertNotVisible: "为什么需要联网？"
+- assertVisible: "开始扫描"

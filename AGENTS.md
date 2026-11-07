@@ -14,13 +14,14 @@
 | 技术栈 | SwiftUI + Photos + Vision，少量 UIKit；**无第三方依赖、无 SPM** |
 | 规模 | 11 个 Swift 文件约 8.1k 行；最大是 `Views/ContentView.swift`（约 3.1k 行） |
 | Bundle ID | `com.eddie.photoorganizer` |
-| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.5 / 22**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
+| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.5 / 27**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
 | 怎么编译 | **没有 Mac。** push 到 `main` → GitHub Actions `build.yml` → 下载 ipa → Windows 上用 Sideloadly 签名安装 |
-| 怎么测 | Maestro 云端 UI 用例 9 条（`maestro/flows/`），手动触发 `ui-test.yml`，本机用 `_ci_check.py` 取回结论 |
+| 怎么测 | Maestro 云端 UI 用例 11 条（`maestro/flows/`），手动触发 `ui-test.yml`，本机用 `_ci_check.py` 取回结论 |
 
 ## 铁律（违反即回退，不接受"顺手优化"）
 
 1. **照片不出手机。** 不引入任何网络请求、上传、埋点、第三方分析 SDK。所有判断只在 `AnalysisEngine` / `ContentAnalyzer` 里做。
+   唯一的"联网"是 `PHImageRequestOptions.isNetworkAccessAllowed = true`——让 **iOS 系统相册**从 iCloud 把源文件取回本地。这不是我们发的请求，照片仍然只落在本机、去向不是我们的服务器。**一旦自己写 `URLSession`，这个 App 的立身之本就没了。**
 2. **不改判定口径。** 重复 / 相似 / 模糊 / 建议分的阈值是长时间踩坑调出来的，见 `docs/architecture.md` 的「判定口径」表。要改先改文档、说明旧口径错在哪，再改代码。注意 `AnalysisEngine.blurThreshold` 是**死代码**（无引用），真正的绝对阈值硬编码在 `buildScores` 里（180 / 290）。
 3. **不给 `photos-add` 授权。** CI 里 `simctl privacy grant photos-add` 会把权限记成"仅添加"，iOS 启动就弹「请求额外访问」框挡住整个界面（已踩过，见提交 `fbe8e75`）。
 4. **扫描期间屏幕常亮不能删。** `ScreenAwake` 跟 `phase` / `isRefining` 联动；去掉后一锁屏系统就掐断解码与 Vision 请求，用户只能从头再扫。
@@ -96,8 +97,16 @@
 - **给 UIViewRepresentable 下「播一次」的指令不要直接存 view 引用** → SwiftUI 每次重建都换实例，存下来的引用翻页后指向一个已经不在屏幕上的 view。用 `playToken` / `stopToken` 两个计数器，`updateUIView` 里比对后执行；**先处理 stop 再处理 play**，否则「上一页 stop + 这一页 play」落在同一帧会变成刚播就停
 - **逐张过的进度别存下标** → 列表会缩（删照片）、会有新照片按时间插到最前、会换筛选，存 `index` 下次就落到一张完全不相干的照片上。存**判过的 id 集合**，进场取「第一个不在集合里的位置」。`TriageProgressStore` 同时存 `marked`：只存 judged 的话，一张标了待删的照片重启后会变成「判过了但标记没了」——既不会重看也不会被删。撤销要 `forget` 掉 judged，否则这张永远回不来
 - **隐私组的逐张过要自己糊** → 网格里的缩略图有 `blurPrivacyThumbnails` 打码，但 `TriageMedia` 是另一套渲染，不显式传 `blurred` 就等于绕过了那个设置。1.5(26) 传了，中央给一个「已打码 · 点一下看原图」的按钮（用 Button 不用 tap 手势，卡片挂着拖拽手势会把 tap 吞掉）
+- **iOS 没有「网络权限」可以申请** → 不要去找什么 `NSNetworkUsageDescription`（不存在），也别指望提前触发系统那个「允许使用无线局域网与蜂窝网络」——它是 App 首次**真正联网**时由系统弹的，不能预触发、不能改文案、不能拦。要让用户知道"为什么联网"，只能自己做一层说明（`CloudNoticeCard` + 键 `cloudNoticeSeenVersion`）
+- **`PHImageResultIsInCloudKey == true` 是「没有返回图」，不是「图比较糊」** → 官方语义是 *no image was provided, because the asset data must be downloaded from iCloud*。所以在 `isNetworkAccessAllowed = false` 下取 iCloud 专属照片，`image` 是 nil；`thumbnail()` 现在直接 `return`，那张就停在默认分类「其他」里——数字上看不出来，实际根本没识别。修法见 `TODO.md` 的 1.5(27) B，**别图省事直接打开 `isNetworkAccessAllowed`**：两万张会把首扫拖成几小时，还烧用户流量
 
 ## 当前版本
+
+`1.5 (27)`：把「为什么要联网」和「iCloud 优化存储」一次说清——
+1. **首启联网说明**：`CloudNoticeCard`（在 `TutorialView.swift` 里，不新增文件）。三句话——下载不是上传 / 整理不用先下载 / 识别全在本机；底部写明断网也能用。遮罩吞点击不关闭，必须点「我知道了」。
+2. **常驻入口**：我的 › 关于 › 网络与 iCloud，复用同一张卡。设置页在 tab 里，所以这里用 sheet，不能用 overlay。
+3. **事实**：iOS 没有「网络权限」可申请。不要按"申请权限"的思路写代码，这里做的是"提前解释"。
+4. **没改的**：iCloud 云端专属照片仍然会漏识别（见 `TODO.md` 1.5(27) B）。弹窗文案已经刻意没写「完全不联网」，别把它改成绝对句。
 
 `1.5 (22)`：在 21 基础上再迭代一轮——
 1. **逐张过按钮重排** `撤销 / 待删 / 保留 / 删除`：「标记」改名「待删」（`flag` 图标），删除从「立即删当前张」改成**批量删所有已标记**（动态「删除 N 张」、没标置灰、二次确认）。

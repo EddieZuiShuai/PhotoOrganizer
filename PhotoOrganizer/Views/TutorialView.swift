@@ -184,8 +184,176 @@ struct TutorialView: View {
     }
 }
 
-private func appShortVersion() -> String {
+/// 当前短版本号。`cloudNoticeSeenVersion` / `tutorialSeenVersion` 都存它，
+/// 所以两处必须读同一个函数（改一处忘另一处会出现"弹过一次就再也不弹"）。
+func appShortVersion() -> String {
     Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.5"
+}
+
+// MARK: - 首启「为什么要联网」说明（1.5(27)）
+
+/// 首次打开 App 的一层说明卡。
+///
+/// **为什么需要它**：iOS 没有「网络权限」这个可申请的权限——App 上网不需要授权，
+/// 系统也不会为访问 iCloud 相册弹任何框。用户看到的「怎么突然要联网」只能靠我们自己说清。
+/// 这层卡出现在**系统相册权限之前**（点「开始扫描」才请求相册），顺序天然是「先解释、再授权」。
+///
+/// 文案口径（改之前先读 `docs/DESIGN.md` 的「文案语气」）：
+/// 1. 只说「从 iCloud 取回」，不说「上传」；
+/// 2. 必须写明「整理本身不用先下载」——扫描只吃本地缩略图 + 元数据，这是事实；
+/// 3. **不要承诺「完全不联网」**：详情页大图、视频播放、重复检测的原图哈希都会走网络。
+///    说满了迟早被打脸，也会让"照片不出手机"这句话失去可信度。
+struct CloudNoticeCard: View {
+    var onDismiss: () -> Void
+    /// 在「我的 › 关于」里重看时，底部那句"去我的里重看"就没意义了
+    var showsFooterHint: Bool = true
+
+    private let blue = Color(red: 0.18, green: 0.49, blue: 0.96)
+
+    var body: some View {
+        VStack(spacing: 0) {
+            ZStack {
+                Circle()
+                    .fill(blue.opacity(0.10))
+                    .frame(width: 56, height: 56)
+                Image(systemName: "icloud.and.arrow.down")
+                    .font(.system(size: 24, weight: .medium))
+                    .foregroundColor(blue)
+            }
+            .padding(.top, 24)
+
+            Text("为什么需要联网？")
+                .font(.system(size: 20, weight: .semibold))
+                .padding(.top, 14)
+
+            Text("只为了从 iCloud 取回照片，不是上传")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .multilineTextAlignment(.center)
+                .padding(.top, 5)
+                .padding(.horizontal, 20)
+
+            VStack(alignment: .leading, spacing: 16) {
+                point(
+                    icon: "arrow.down.circle",
+                    title: "下载，不是上传",
+                    body: "开了「优化 iPhone 存储空间」时，原图只存在 iCloud。你要看大图、播视频、做精确比对，App 会让 iOS 取回那一张。"
+                )
+                point(
+                    icon: "bolt.horizontal.circle",
+                    title: "整理不用先下载",
+                    body: "扫描只用手机里已有的缩略图和拍摄信息。不会为了整理，把两万张照片全拉回本地。"
+                )
+                point(
+                    icon: "lock.shield",
+                    title: "识别全在这台手机上",
+                    body: "清晰度、重复、人脸、发票都是本机算的。没有上传接口，没有第三方统计，没有账号。"
+                )
+            }
+            .padding(.top, 20)
+            .padding(.horizontal, 22)
+
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "wifi.slash")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(Color(red: 0.9, green: 0.5, blue: 0.1))
+                    .padding(.top, 1)
+                Text("断网也能用。只是 iCloud 上的照片，发票和人脸识别会不全。")
+                    .font(.system(size: 12))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(red: 0.9, green: 0.5, blue: 0.1).opacity(0.08))
+            .cornerRadius(10)
+            .padding(.horizontal, 22)
+            .padding(.top, 18)
+
+            Button(action: onDismiss) {
+                Text("我知道了")
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+                    .background(blue)
+                    .cornerRadius(12)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 22)
+            .padding(.top, 18)
+            .accessibilityIdentifier("cloud-notice-ok")
+
+            if showsFooterHint {
+                Text("以后可以在「我的 › 关于 › 网络与 iCloud」重看")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .padding(.top, 10)
+                    .padding(.bottom, 20)
+            } else {
+                Color.clear.frame(height: 8)
+            }
+        }
+        .frame(maxWidth: 340)
+        .background(Color.white)
+        .cornerRadius(14)
+    }
+
+    private func point(icon: String, title: String, body: String) -> some View {
+        HStack(alignment: .top, spacing: 11) {
+            Image(systemName: icon)
+                .font(.system(size: 15, weight: .medium))
+                .foregroundColor(blue)
+                .frame(width: 22, height: 22)
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 14, weight: .semibold))
+                Text(body)
+                    .font(.system(size: 12.5))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .lineSpacing(2)
+            }
+        }
+    }
+}
+
+/// 盖在首页上的那一层：半透明遮罩 + 卡片。
+///
+/// 遮罩**吞掉点击但不关闭**——这是一段需要读完的说明，误触关掉等于没提示。
+/// 想关只能点「我知道了」，保证 `cloudNoticeSeenVersion` 真的被写下去。
+struct CloudNoticeOverlay: View {
+    var onDismiss: () -> Void
+
+    var body: some View {
+        ZStack {
+            Color.black.opacity(0.38)
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { }
+            CloudNoticeCard(onDismiss: onDismiss)
+                .padding(.horizontal, 28)
+        }
+    }
+}
+
+/// 「我的 › 关于 › 网络与 iCloud」里重看用的形态。
+/// 这里必须用 sheet：设置页在 tab 里，overlay 盖不住底部那条 `safeAreaInset` 的 tab bar。
+struct CloudNoticeSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        ZStack {
+            Color(red: 0.96, green: 0.96, blue: 0.97).ignoresSafeArea()
+            ScrollView {
+                CloudNoticeCard(onDismiss: { dismiss() }, showsFooterHint: false)
+                    .padding(.horizontal, 20)
+                    .padding(.vertical, 24)
+            }
+        }
+        .presentationDetents([.large])
+    }
 }
 
 // MARK: - 五个示意图

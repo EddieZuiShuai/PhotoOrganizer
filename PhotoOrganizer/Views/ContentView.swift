@@ -59,6 +59,12 @@ struct ContentView: View {
     @State private var scanID = 0
     @Environment(\.scenePhase) private var scenePhase
 
+    /// 首启「为什么需要联网」说明。
+    /// 存**版本号**而不是 Bool：以后这段文案大改，把 `CFBundleShortVersionString` 一升
+    /// 就会自然再弹一次，不用清缓存也不用加新键。和 `tutorialSeenVersion` 同一套口径。
+    @AppStorage("cloudNoticeSeenVersion") private var cloudNoticeSeen: String = ""
+    @State private var showCloudNotice = false
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -91,6 +97,18 @@ struct ContentView: View {
             .navigationTitle("相册整理")
             .navigationBarTitleDisplayMode(.inline)
         }
+        // 首启说明挂在 NavigationStack **外面**，不是放在它的 ZStack 里：
+        // 导航栏是容器的 chrome，ZStack 里的遮罩盖不住它（顶部会露出一条「相册整理」）。
+        // 挂外面还能保证 phase 切到扫描页时它依然在最上层。
+        .overlay {
+            if showCloudNotice {
+                CloudNoticeOverlay {
+                    cloudNoticeSeen = appShortVersion()
+                    withAnimation(.easeOut(duration: 0.18)) { showCloudNotice = false }
+                }
+                .transition(.opacity)
+            }
+        }
         .alert("出错了", isPresented: Binding(
             get: { errorMessage != nil },
             set: { if !$0 { errorMessage = nil } }
@@ -113,6 +131,12 @@ struct ContentView: View {
         }
         .onAppear {
             ScreenAwake.shared.setAppActive(scenePhase == .active)
+            // 首启（含从旧版本升上来第一次）说明一次。
+            // 不做延时：onAppear 时首页已经布局完，直接出现不会闪白；
+            // 加延迟反而会让 CI 里的 optional 点击和截图对不上时序。
+            if cloudNoticeSeen != appShortVersion() {
+                showCloudNotice = true
+            }
         }
         .onDisappear {
             ScreenAwake.shared.setScanning(false)
@@ -3227,6 +3251,8 @@ struct SettingsTabView: View {
     @State private var toast: String?
     @State private var showTutorial = false
     @State private var showHidden = false
+    /// 「关于 › 网络与 iCloud」里重看首启那段说明
+    @State private var showCloudNotice = false
 
     private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
 
@@ -3442,6 +3468,31 @@ struct SettingsTabView: View {
                     infoRow(title: "这次分析", value: "\(photoCount) 项")
                     divider
                     infoRow(title: "照片处理", value: "全部在本机")
+                    divider
+                    // 「照片不上传」这句话只在首启说一次不够——想确认的人得能找到。
+                    // 这里放常驻入口，重看同一张卡（`CloudNoticeCard`），文案只有一份。
+                    Button {
+                        showCloudNotice = true
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("网络与 iCloud")
+                                    .font(.system(size: 15))
+                                    .foregroundColor(.primary)
+                                Text("为什么要联网、照片会不会被上传")
+                                    .font(.system(size: 11.5))
+                                    .foregroundColor(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                        }
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.vertical, 12)
+                    .accessibilityIdentifier("settings-cloud-notice")
                 }
 
                 Text("所有识别都在手机本地完成：没有服务器、没有上传、没有账号。删掉的照片进系统「最近删除」，30 天内可以恢复。\n\n判定口径：重复=原图哈希相同；相似=缩略图感知哈希接近；模糊=清晰度低于全库中位数；隐私=排除人脸后的裸露密度。误判永远会有，最终点删除的永远是你自己。")
@@ -3461,6 +3512,9 @@ struct SettingsTabView: View {
         }
         .sheet(isPresented: $showHidden) {
             HiddenAssetsView()
+        }
+        .sheet(isPresented: $showCloudNotice) {
+            CloudNoticeSheet()
         }
         .onChange(of: scenePhase) { phase in
             // 从系统设置改完权限回来，数字要跟着变

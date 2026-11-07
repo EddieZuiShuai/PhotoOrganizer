@@ -5,6 +5,14 @@ name: 共用 - 启动并等扫描跑完
 # Maestro 2.x 要求每个被解析的 flow 文件都带配置头（哪怕只是被 runFlow 引用），
 # 少了会直接报 Config Section Required。
 - launchApp
+
+# 1.5(27) 起首启会盖一层「为什么需要联网」说明，它会挡住「开始扫描」。
+# 正常情况下 00_cloud_notice 已经把它关掉并写了 cloudNoticeSeenVersion，
+# 这里是兜底：只跑单条 flow、或换了模拟器时也能继续。
+- tapOn:
+    id: "cloud-notice-ok"
+    optional: true
+
 - takeScreenshot: 00_home
 
 # 万一 TCC 里还留着「仅添加」之类的旧状态，启动时会先弹一次「请求额外访问」。

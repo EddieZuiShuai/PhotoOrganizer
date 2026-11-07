@@ -34,3 +34,19 @@ name: 09 新手教程：我的 → 5 页翻到底 → 关闭
 # 关掉之后回到「我的」，入口还在，可以重看
 - assertVisible: "新手教程"
 - takeScreenshot: 12_tutorial_done
+
+# 1.5(27)：首启那段「为什么要联网」不能只弹一次就再也找不到。
+# 入口在「关于」分组最后一行，要滚下去。
+- scrollUntilVisible:
+    element:
+      id: "settings-cloud-notice"
+    direction: DOWN
+    timeout: 10000
+- takeScreenshot: 13_about_cloud_entry
+- tapOn:
+    id: "settings-cloud-notice"
+- assertVisible: "为什么需要联网？"
+- assertVisible: "下载，不是上传"
+- tapOn:
+    id: "cloud-notice-ok"
+- assertNotVisible: "为什么需要联网？"

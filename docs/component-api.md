@@ -162,6 +162,7 @@ func compress(asset: PHAsset, completion: @escaping (Result<Outcome, Error>) -> 
 | `CategoryOverviewView` / `CategoryDetailView` | `ContentView.swift` | 分类总览（`NavigationStack` 根）/ 单类详情（多选、删除、大图） |
 | `SettingsTabView` | `ContentView.swift` | 我的（显示与内容 / 数据与存储 / 帮助与支持 / 系统权限 / 关于） |
 | `TutorialView` + 5 个 Mock | `TutorialView.swift` | 新手教程 5 页；Mock 全部假数据，不引用 `AnalysisResult` |
+| `CloudNoticeCard` / `CloudNoticeOverlay` / `CloudNoticeSheet` | `TutorialView.swift` | 首启「为什么需要联网」说明。`Card` 是内容本体（`onDismiss` + `showsFooterHint`）；`Overlay` 盖首页，遮罩吞点击**不关闭**；`Sheet` 给「我的 › 关于 › 网络与 iCloud」重看，必须用 sheet——overlay 盖不住 tab bar |
 | `SpaceStats` | `ContentView.swift` | 体积统计单一口径（结果页与空间 tab 共用） |
 | `SpaceDashboardView` / `FilterSheet` | `DashboardView.swift` | 体积看板（tab 页，不再是 sheet）/ 时间段与相册筛选 |
 | `SwipeTriageView` / `TriageMedia` | `SwipeTriageView.swift` | 逐张过主界面 / 卡片媒体（照片 fit、视频可播、Live 自动播一次）。`blurred: true` 时先糊住，中央一个「点一下看原图」 |
@@ -181,6 +182,7 @@ func compress(asset: PHAsset, completion: @escaping (Result<Outcome, Error>) -> 
 | `TriageImageCache.shared` | `NSCache`（countLimit 30） | 逐张过图片缓存；视频不走这里（封面单独取） |
 | `TriageProgressStore.shared` | `UserDefaults["triageProgress.v1"]` | 逐张过进度：`key → {judged:[id], marked:[id], updatedAt}`。单上下文上限 5000 条、最多 8 个上下文、30 天过期；攒 2 秒落盘，`flush()` 兜底 |
 | `ScreenAwake.shared` | 运行时 | 引用计数式屏幕常亮，`setScanning` / `setAppActive` 两个开关 |
+| `cloudNoticeSeenVersion` | `@AppStorage`（`UserDefaults`） | 首启联网说明「看过」的版本号。**存版本号不是 Bool**：以后文案大改，升版本号就会自然再弹一次，不用加新键也不用清缓存。判定函数是 `appShortVersion()`，别在别处再写一份 |
 
 ## 新增功能的推荐改法
 

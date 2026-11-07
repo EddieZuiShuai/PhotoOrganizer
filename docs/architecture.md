@@ -165,6 +165,25 @@ v2 的密度是个**比值**，比值在分母极小时会骗人。头像照就�
 | 扫描期间 `isIdleTimerDisabled` | 锁屏 = 挂起，解码与 Vision 请求被系统掐断 |
 | 进度对象 `RefineStatus` 独立 `ObservableObject` | 每几十毫秒变一次；放在 `ContentView.@State` 会让两万条结果页整体重建，滚动卡死 |
 
+### iCloud 取图口径（1.5(27) 记录现状）
+
+扫描阶段**一律 `isNetworkAccessAllowed = false`**：不为识别去下原图。理由是全量下载的代价不可接受（两万张优化版按 1.5 MB 算约 30 GB、数小时、烧流量），而特征计算只用得到 320px。
+
+代价是一批「只在云端」的照片识别不全：
+
+| 取图点 | 尺寸 | 拿不到时会发生什么 |
+|---|---|---|
+| `thumbnail(for:)`（特征 + 分类） | 256 / 320 | 整条 `return`，该张停在默认分类「其他」，`contentDone` 保持 false（下次还会重试） |
+| `imageForOCR(for:)` | 1024 | 返回 nil，发票 / 二维码 / 文档读不出来 |
+| `refineFacesPass` | 512 | 数不出脸，远景合照可能留在「单人照」 |
+| `privacyFrames`（`requestAVAsset`） | — | 抽帧失败，隐私视频漏判 |
+
+**关键事实**：`PHImageResultIsInCloudKey == true` 的官方语义是 *no image was provided*，**不是**「图比较糊」。所以不要把它当降级图继续用——那等于把"没看到"写成"看过了"。
+
+**已知缺口**：`thumbnail` 的返回值没有质量维度，调用方分不清「本地真图 / 降级图 / 压根没图」。补法见 `TODO.md` 1.5(27) B 的 C1~C3：加质量信号 → `cloudOnly` 不写死结论 → 一个手动补全入口。
+
+唯一允许联网的取图点：`loadImage`（详情页大图）、`originalData`（重复检测的字节哈希，只对候选跑）、视频与 Live 播放。
+
 ## 状态所有权
 
 | 状态 | 归谁 | 生命周期 |
