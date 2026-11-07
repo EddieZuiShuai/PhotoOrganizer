@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-15, macos-14]
+        runner: [macos-15]
 
     steps:
       - name: 拉取代码
