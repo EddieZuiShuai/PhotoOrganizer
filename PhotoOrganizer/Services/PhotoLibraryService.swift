@@ -295,6 +295,13 @@ final class PhotoLibraryService {
         })
     }
 
+    /// 按 localIdentifier 取一个资产。逐张过里想「隐藏当前这张」时用。
+    /// 拿不到返回 nil（比如照片刚被系统清理、或权限被收回），调用方要能显示失败而不是崩。
+    func asset(withID id: String) -> PHAsset? {
+        let result = PHAsset.fetchAssets(withLocalIdentifiers: [id], options: nil)
+        return result.firstObject
+    }
+
     // MARK: - 隐藏
 
     /// 把照片/视频放进系统「已隐藏」相簿，或从里面取出来。
@@ -322,6 +329,16 @@ final class PhotoLibraryService {
     }
 
     /// 系统「已隐藏」相簿里的全部条目。
+    ///
+    /// ⚠️ **iOS 16 起大概率返回空，这不是 bug。** Apple 官方文档写得很直白：
+    /// 「从 iOS 16 开始，用户可以要求身份验证才能查看隐藏的智能相簿，且该设置
+    /// 默认为 true。**当值为 true 时，系统会返回一个空的智能相簿。**」
+    /// 开发者论坛里 Apple 工程师也确认：没有任何 API 能让第三方 App 通过
+    /// PhotoKit 拿到这些资产，只能弹 `PHPickerViewController` 让用户自己选。
+    ///
+    /// 所以这个函数只在「用户主动关掉了 Face ID 锁」时才有内容。调用方
+    /// （`HiddenAssetsView`）必须把「读到 0 条」当成**正常的系统限制**来处理，
+    /// 不能显示成「你没有隐藏过照片」。
     ///
     /// 必须显式 `includeHiddenAssets = true`，否则连这个相簿自己都取不到内容——
     /// 这是 PhotoKit 里最容易踩的一处：相簿是对的，开关没开就是空的。

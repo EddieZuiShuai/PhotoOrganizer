@@ -14,6 +14,10 @@ struct TriageRequest: Identifiable {
     let progressKey: String
     /// 隐私组：卡片先糊住，点一下才看原图。别处一律 false。
     var blurred: Bool = false
+    /// 隐私组：底部多给一颗「隐藏」（单张）。
+    /// **不能拿 `blurred` 代替**——用户在设置里关掉打码后 `blurred` 是 false，
+    /// 但这里仍然是隐私组，隐藏按钮该在还得在。
+    var isPrivacy: Bool = false
 }
 
 // MARK: - 逐张过的进度（判过的 id + 待删标记，落盘）
@@ -640,9 +644,14 @@ struct SwipeTriageView: View {
     let progressKey: String
     /// 隐私组：卡片先糊住，点一下才看原图
     let blurred: Bool
+    /// 隐私组：底部多给一颗「隐藏」。只作用于**当前这一张**，
+    /// 不是把所有待删的一起藏——那是两个完全不同的动作。
+    let isPrivacy: Bool
     let onFinish: (Set<String>) -> Void
     /// 批量真删所有已标记的。列表那边负责落到系统相册并更新已删集合。
     let onDeleteMany: ([PhotoItem]) -> Void
+    /// 单张隐藏成功。列表那边负责把 id 加进 `hiddenIDs`，让网格立刻消失。
+    let onHide: ((PhotoItem) -> Void)?
 
     @Environment(\.dismiss) private var dismiss
 
@@ -679,14 +688,18 @@ struct SwipeTriageView: View {
         progressKey: String,
         items: [PhotoItem],
         blurred: Bool = false,
+        isPrivacy: Bool = false,
         onFinish: @escaping (Set<String>) -> Void,
-        onDeleteMany: @escaping ([PhotoItem]) -> Void
+        onDeleteMany: @escaping ([PhotoItem]) -> Void,
+        onHide: ((PhotoItem) -> Void)? = nil
     ) {
         self.title = title
         self.progressKey = progressKey
         self.blurred = blurred
+        self.isPrivacy = isPrivacy
         self.onFinish = onFinish
         self.onDeleteMany = onDeleteMany
+        self.onHide = onHide
         _list = State(initialValue: items)
 
         // 进场位置不是 0，而是「第一张还没判断过的」。
@@ -1036,7 +1049,9 @@ struct SwipeTriageView: View {
     // MARK: 按钮
 
     private var actionButtons: some View {
-        HStack(spacing: 14) {
+        // 隐私组多一颗「隐藏」，一共五颗。间距从 14 收到 10：
+        // 五颗 52 的圆 + 四个 10 的间距 = 300，iPhone SE（375）也放得下。
+        HStack(spacing: 10) {
             roundButton(icon: "arrow.uturn.backward", label: "撤销", key: "undo",
                         bg: Color.white.opacity(0.14), enabled: !history.isEmpty && !busy) {
                 undo()
@@ -1048,6 +1063,14 @@ struct SwipeTriageView: View {
             roundButton(icon: "checkmark", label: "保留", key: "keep",
                         bg: Color(red: 0.2, green: 0.62, blue: 0.36), enabled: !busy) {
                 commit(keep: true)
+            }
+            // 隐藏和「待删」是两码事：待删是**攒着一起删**，隐藏是**这一张立刻挪走**。
+            // 所以它单独一颗、只作用于当前这张，不读 marks。
+            if isPrivacy {
+                roundButton(icon: "eye.slash.fill", label: "隐藏", key: "hide-one",
+                            bg: Color.white.opacity(0.18), enabled: !busy) {
+                    hideCurrent()
+                }
             }
             // 删除 = 一次性真删所有已标「待删」的，不可撤销，单独一次确认。
             // 动态显示张数，一张都没标时置灰。
@@ -1232,6 +1255,54 @@ struct SwipeTriageView: View {
         busy = false
         showHint("已删除 \(removed) 张 · 30 天内可在「最近删除」恢复")
         TriageImageCache.shared.preload(upcoming(index, 4))
+    }
+
+    /// 隐藏**当前这一张**。和「待删」完全无关：待删是攒着一起删，这个是立刻挪走。
+    ///
+    /// 走系统的 `isHidden`：照片进「照片」App 的「已隐藏」相簿，有 Face ID 保护。
+    /// 代价是 iOS 16 起第三方 App 读不回那个相簿，所以这里**不做撤销**——
+    /// 撤销了也拿不回来（`PHAssetChangeRequest` 需要先拿到 asset，而它已经读不到了）。
+    /// 提示里直接告诉用户去哪儿取消，比给一个假的撤销按钮诚实。
+    private func hideCurrent() {
+        guard index < list.count, !busy else { return }
+        let item = list[index]
+        guard let asset = PhotoLibraryService.shared.asset(withID: item.id) else {
+            showHint("读不到这张，可能刚被系统清理")
+            return
+        }
+        busy = true
+        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+
+        PhotoLibraryService.shared.setHidden(true, assets: [asset]) { ok, err in
+            DispatchQueue.main.async {
+                busy = false
+                guard ok else {
+                    showHint("隐藏失败：" + (err?.localizedDescription ?? "未知原因"))
+                    return
+                }
+
+                // 从进度里摘掉而不是记成「判过」：它已经从相册里消失，
+                // 留在 judged 里只是垃圾；万一用户以后在系统相册取消隐藏，
+                // 重新扫回来时它应该重新出现、重新被问一次。
+                TriageProgressStore.shared.remove(key: progressKey, ids: [item.id])
+                marks.remove(item.id)
+                noteHiddenCount(1)
+                onHide?(item)
+
+                var instant = Transaction()
+                instant.disablesAnimations = true
+                withTransaction(instant) {
+                    list.removeAll { $0.id == item.id }
+                    // 撤销链跨过被移除的项会整体错位，直接清空。
+                    history.removeAll()
+                    fly = nil
+                    drag = .zero
+                    if index >= list.count { index = list.count }
+                }
+                showHint("已隐藏 · 去「照片」App 的「已隐藏」可取消")
+                TriageImageCache.shared.preload(upcoming(index, 4))
+            }
+        }
     }
 
     private func undo() {

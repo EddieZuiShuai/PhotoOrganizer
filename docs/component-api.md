@@ -165,7 +165,7 @@ func compress(asset: PHAsset, completion: @escaping (Result<Outcome, Error>) -> 
 | `CloudNoticeCard` / `CloudNoticeOverlay` / `CloudNoticeSheet` | `TutorialView.swift` | 首启「为什么需要联网」说明。`Card` 是内容本体（`onDismiss` + `showsFooterHint`）；`Overlay` 盖首页，遮罩吞点击**不关闭**；`Sheet` 给「我的 › 关于 › 网络与 iCloud」重看，必须用 sheet——overlay 盖不住 tab bar |
 | `SpaceStats` | `ContentView.swift` | 体积统计单一口径（结果页与空间 tab 共用） |
 | `SpaceDashboardView` / `FilterSheet` | `DashboardView.swift` | 体积看板（tab 页，不再是 sheet）/ 时间段与相册筛选 |
-| `SwipeTriageView` / `TriageMedia` | `SwipeTriageView.swift` | 逐张过主界面 / 卡片媒体（照片 fit、视频可播、Live 自动播一次）。`blurred: true` 时先糊住，中央一个「点一下看原图」 |
+| `SwipeTriageView` / `TriageMedia` | `SwipeTriageView.swift` | 逐张过主界面 / 卡片媒体（照片 fit、视频可播、Live 自动播一次）。`blurred: true` 时先糊住，中央一个「点一下看原图」。`isPrivacy: true` 时底部多第五颗「隐藏」（只作用于当前这张，走 `onHide` 回调），**不能拿 `blurred` 代替**——设置里关掉打码后 `blurred` 是 false，但仍是隐私组 |
 | `TriageVideoBox` | `SwipeTriageView.swift` | 单卡片视频播放器，划走即停 |
 | `TriageProgressStore` | `SwipeTriageView.swift` | 逐张过进度（判过的 id + 待删标记），按上下文 key 存 UserDefaults |
 | `TriageImageCache` / `TriageMetrics` | `SwipeTriageView.swift` | 预取缓存（30 张，跳过视频）/ 统一取图尺寸 |
@@ -183,6 +183,7 @@ func compress(asset: PHAsset, completion: @escaping (Result<Outcome, Error>) -> 
 | `TriageProgressStore.shared` | `UserDefaults["triageProgress.v1"]` | 逐张过进度：`key → {judged:[id], marked:[id], updatedAt}`。单上下文上限 5000 条、最多 8 个上下文、30 天过期；攒 2 秒落盘，`flush()` 兜底 |
 | `ScreenAwake.shared` | 运行时 | 引用计数式屏幕常亮，`setScanning` / `setAppActive` 两个开关 |
 | `cloudNoticeSeenVersion` | `@AppStorage`（`UserDefaults`） | 首启联网说明「看过」的版本号。**存版本号不是 Bool**：以后文案大改，升版本号就会自然再弹一次，不用加新键也不用清缓存。判定函数是 `appShortVersion()`，别在别处再写一份 |
+| `hiddenEverCount` | `UserDefaults`（写入走 `noteHiddenCount(_:)`） | 累计隐藏过多少张。只有一个读者：`HiddenAssetsView` 的空态文案。iOS 16 起 App 读系统「已隐藏」永远返回空，只能靠这个数区分「真没藏过」和「藏过但读不到」 |
 
 ## 新增功能的推荐改法
 

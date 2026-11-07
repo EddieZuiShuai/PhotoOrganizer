@@ -14,7 +14,7 @@
 | 技术栈 | SwiftUI + Photos + Vision，少量 UIKit；**无第三方依赖、无 SPM** |
 | 规模 | 11 个 Swift 文件约 8.1k 行；最大是 `Views/ContentView.swift`（约 3.1k 行） |
 | Bundle ID | `com.eddie.photoorganizer` |
-| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.5 / 27**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
+| 版本号唯一来源 | `PhotoOrganizer/Info.plist` → `CFBundleShortVersionString` / `CFBundleVersion`（当前 **1.5 / 28**）。`project.pbxproj` 里的 `MARKETING_VERSION = 1.0` 是无效残留，改它不生效。首页底部会显示这两个号，方便用户自查 |
 | 怎么编译 | **没有 Mac。** push 到 `main` → GitHub Actions `build.yml` → 下载 ipa → Windows 上用 Sideloadly 签名安装 |
 | 怎么测 | Maestro 云端 UI 用例 11 条（`maestro/flows/`），手动触发 `ui-test.yml`，本机用 `_ci_check.py` 取回结论 |
 
@@ -100,8 +100,16 @@
 - **`maestro test <目录>` 不按文件名顺序跑** → 实测 11 条的完成顺序是 04/08/06/09/01/07/00/10/05/02/03。任何"我这条叫 00，肯定第一个跑"的假设都会翻车：首启用例断言弹窗可见时，弹窗早被别的 flow 里 `scan.yaml` 的 optional 点击关掉、`cloudNoticeSeenVersion` 都写上了。依赖初始状态的用例要么用启动参数强制（`-ForceCloudNotice`，只在 DEBUG 生效），要么拆到独立目录单独跑一次
 - **iOS 没有「网络权限」可以申请** → 不要去找什么 `NSNetworkUsageDescription`（不存在），也别指望提前触发系统那个「允许使用无线局域网与蜂窝网络」——它是 App 首次**真正联网**时由系统弹的，不能预触发、不能改文案、不能拦。要让用户知道"为什么联网"，只能自己做一层说明（`CloudNoticeCard` + 键 `cloudNoticeSeenVersion`）
 - **`PHImageResultIsInCloudKey == true` 是「没有返回图」，不是「图比较糊」** → 官方语义是 *no image was provided, because the asset data must be downloaded from iCloud*。所以在 `isNetworkAccessAllowed = false` 下取 iCloud 专属照片，`image` 是 nil；`thumbnail()` 现在直接 `return`，那张就停在默认分类「其他」里——数字上看不出来，实际根本没识别。修法见 `TODO.md` 的 1.5(27) B，**别图省事直接打开 `isNetworkAccessAllowed`**：两万张会把首扫拖成几小时，还烧用户流量
+- **iOS 16 起，第三方 App 读系统「已隐藏」相簿永远是空** → 只要用户开着「用 Face ID 查看已隐藏相簿」（**默认就是开的**），`smartAlbumAllHidden` 和 `includeHiddenAssets = true` 都会被系统忽略，返回空结果。Apple 工程师在论坛确认没有任何 API 能绕过，只能弹 `PHPickerViewController` 让用户手选。所以：**不要写「隐藏后可在 App 里找回」这种文案**，那是在骗人；空态要解释成「照片还在，是 App 读不到」并给跳系统相册的出口。`hiddenEverCount` 只用来区分「真没藏过」和「藏过但读不到」
+- **`PHLivePhotoView` 不能直接丢进 ZStack** → 它拿到的是父容器的安全区尺寸，而 `ZoomableImageView` 是全屏 + `ignoresSafeArea` + `scaledToFit`，两者对不上时播放会在照片上方露出一条重复内容（1.5(27) 真机反馈）。必须按 `asset.pixelWidth/pixelHeight` 自己算出 fit 后的矩形，精确设成它的 frame，再加 `.clipped()`
 
 ## 当前版本
+
+`1.5 (28)`：真机反馈四条，两条是系统限制、两条是真问题——
+1. **「已隐藏的照片」永远是空的是 iOS 限制**：iOS 16 起默认要求 Face ID，第三方 App 拿到空相簿，没有 API 能绕过。空态改成说明 + 跳系统相册；确认弹窗和 toast 不再承诺「App 里可找回」。
+2. **逐张过单张隐藏**：隐私组底部第五颗按钮，只作用于当前这张。因为读不回，**不做撤销**，hint 直接说去哪儿取消。
+3. **选中态文案**：隐私组选中后加一行「删除进最近删除；隐藏只是挪进系统相簿」。
+4. **Live 残影**：动态层按宽高比精确 frame + `clipped()`。
 
 `1.5 (27)`：把「为什么要联网」和「iCloud 优化存储」一次说清——
 1. **首启联网说明**：`CloudNoticeCard`（在 `TutorialView.swift` 里，不新增文件）。三句话——下载不是上传 / 整理不用先下载 / 识别全在本机；底部写明断网也能用。遮罩吞点击不关闭，必须点「我知道了」。

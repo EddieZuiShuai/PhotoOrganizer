@@ -797,7 +797,7 @@ struct ResultView: View {
             Button("取消", role: .cancel) {}
             Button("隐藏") { hideSelected() }
         } message: {
-            Text("它们会被移到系统「已隐藏」相簿，并从本 App 里消失。iOS 16 起打开那个相簿需要 Face ID。想找回：我的 › 已隐藏的照片。")
+            Text("它们会被移到系统「已隐藏」相簿，并从本 App 里消失，打开要 Face ID。注意：iOS 16 起 App 读不到那个相簿，**取消隐藏只能去「照片」App 手动操作**。")
         }
         .confirmationDialog(
             "压缩这段视频？",
@@ -838,15 +838,22 @@ struct ResultView: View {
                 progressKey: request.progressKey,
                 items: request.items,
                 blurred: request.blurred,
+                isPrivacy: request.isPrivacy,
                 onFinish: { marks in
                     guard !marks.isEmpty else { return }
                     selectedIDs.formUnion(marks)
-                    showToast("已标 \(marks.count) 张待删，点下面红色按钮统一删除")
+                    showToast("已选 \(marks.count) 张 · 可以删除，也可以隐藏")
                 },
                 onDeleteMany: { items in
                     // 逐张过里点「删除 N 张」= 批量真删。这里只负责落到相册，
                     // 卡片自己会从列表里拿掉，不需要再回到结果页刷新。
                     deleteItems(items)
+                },
+                onHide: { item in
+                    // 逐张过里单张隐藏成功。网格要立刻少一格，选中集合也要摘掉。
+                    hiddenIDs.insert(item.id)
+                    selectedIDs.remove(item.id)
+                    showToast("已隐藏 1 张 · 去「照片」App 的「已隐藏」可取消")
                 }
             )
         }
@@ -1945,6 +1952,16 @@ struct ResultView: View {
                 }
                 .padding(16)
             } else {
+                // 隐私页签里「删除」和「隐藏」并排，先把区别写出来再让用户点。
+                if isPrivacyTab {
+                    Text("「删除」会进最近删除；「隐藏」只是挪进系统相簿，照片还在")
+                        .font(.system(size: 10.5))
+                        .foregroundColor(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 16)
+                        .padding(.top, 10)
+                }
+
                 HStack(spacing: 10) {
                     Button {
                         selectedIDs.removeAll()
@@ -2075,7 +2092,8 @@ struct ResultView: View {
                 if success {
                     hiddenIDs.formUnion(chosen.map { $0.id })
                     selectedIDs.subtract(Set(chosen.map { $0.id }))
-                    showToast("已隐藏 \(chosen.count) 张 · 在「我的 › 已隐藏的照片」里可找回")
+                    noteHiddenCount(chosen.count)
+                    showToast("已隐藏 \(chosen.count) 张 · 取消隐藏要去「照片」App 的「已隐藏」")
                 } else {
                     message = "隐藏失败：" + (error?.localizedDescription ?? "未知原因")
                 }
@@ -2134,7 +2152,8 @@ struct ResultView: View {
             title: tab.title,
             items: list,
             progressKey: triageKey,
-            blurred: isPrivacyTab && blurPrivacyThumbnails
+            blurred: isPrivacyTab && blurPrivacyThumbnails,
+            isPrivacy: isPrivacyTab
         )
     }
 
@@ -3017,7 +3036,8 @@ struct CategoryDetailView: View {
                             title: category.rawValue,
                             items: alive,
                             progressKey: triageKey,
-                            blurred: category.isPrivacy && blurPrivacyThumbnails
+                            blurred: category.isPrivacy && blurPrivacyThumbnails,
+                            isPrivacy: category.isPrivacy
                         )
                     }
                     .padding(.bottom, 2)
@@ -3078,7 +3098,7 @@ struct CategoryDetailView: View {
             Button("取消", role: .cancel) {}
             Button("隐藏") { hideSelected() }
         } message: {
-            Text("它们会被移到系统「已隐藏」相簿，并从本 App 里消失。iOS 16 起打开那个相簿需要 Face ID。想找回：我的 › 已隐藏的照片。")
+            Text("它们会被移到系统「已隐藏」相簿，并从本 App 里消失，打开要 Face ID。注意：iOS 16 起 App 读不到那个相簿，**取消隐藏只能去「照片」App 手动操作**。")
         }
         .alert("出错了", isPresented: Binding(
             get: { message != nil },
@@ -3103,13 +3123,19 @@ struct CategoryDetailView: View {
                 progressKey: request.progressKey,
                 items: request.items,
                 blurred: request.blurred,
+                isPrivacy: request.isPrivacy,
                 onFinish: { marks in
                     guard !marks.isEmpty else { return }
                     selected.formUnion(marks)
-                    showToast("已标 \(marks.count) 张待删，点下面红色按钮统一删除")
+                    showToast("已选 \(marks.count) 项 · 可以删除，也可以隐藏")
                 },
                 onDeleteMany: { items in
                     delete(items)
+                },
+                onHide: { item in
+                    hiddenIDs.insert(item.id)
+                    selected.remove(item.id)
+                    showToast("已隐藏 1 项 · 去「照片」App 的「已隐藏」可取消")
                 }
             )
         }
@@ -3129,53 +3155,66 @@ struct CategoryDetailView: View {
     }
 
     private var deleteBar: some View {
-        HStack(spacing: 8) {
-            Button {
-                selected.removeAll()
-            } label: {
-                Text("取消选中")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundColor(.secondary)
-            }
-            .buttonStyle(.plain)
-
-            Spacer(minLength: 4)
-
-            // 隐藏只对隐私组出现：这里误点一次就是把照片从 App 里「弄丢」，
-            // 普通分类里放这颗按钮没有意义，只会增加误触。
+        VStack(spacing: 0) {
+            // 选中之后「删除」和「隐藏」并排，用户会问「到底是要删还是要藏」。
+            // 一句话把两个动作的区别摆出来，比改按钮文案省地方。
             if category.isPrivacy {
+                Text("「删除」会进最近删除；「隐藏」只是挪进系统相簿，照片还在")
+                    .font(.system(size: 10.5))
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+            }
+
+            HStack(spacing: 8) {
                 Button {
-                    confirmHide = true
+                    selected.removeAll()
                 } label: {
-                    Text("隐藏 \(selected.count)")
-                        .font(.system(size: 14, weight: .medium))
-                        .foregroundColor(.primary)
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 9)
-                        .background(Color.black.opacity(0.06))
-                        .cornerRadius(9)
+                    Text("取消选中")
+                        .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.secondary)
                 }
                 .buttonStyle(.plain)
-                .accessibilityIdentifier("category-hide")
-            }
 
-            Button {
-                let chosen = alive.filter { selected.contains($0.id) }
-                delete(chosen)
-            } label: {
-                Text("删除 \(selected.count) 项")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundColor(.white)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(Color(red: 0.85, green: 0.25, blue: 0.2))
-                    .cornerRadius(10)
+                Spacer(minLength: 4)
+
+                // 隐藏只对隐私组出现：这里误点一次就是把照片从 App 里「弄丢」，
+                // 普通分类里放这颗按钮没有意义，只会增加误触。
+                if category.isPrivacy {
+                    Button {
+                        confirmHide = true
+                    } label: {
+                        Text("隐藏 \(selected.count)")
+                            .font(.system(size: 14, weight: .medium))
+                            .foregroundColor(.primary)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 9)
+                            .background(Color.black.opacity(0.06))
+                            .cornerRadius(9)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("category-hide")
+                }
+
+                Button {
+                    let chosen = alive.filter { selected.contains($0.id) }
+                    delete(chosen)
+                } label: {
+                    Text("删除 \(selected.count) 项")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        .background(Color(red: 0.85, green: 0.25, blue: 0.2))
+                        .cornerRadius(10)
+                }
+                .buttonStyle(.plain)
+                .accessibilityIdentifier("category-delete")
             }
-            .buttonStyle(.plain)
-            .accessibilityIdentifier("category-delete")
+            .padding(.horizontal, 16)
+            .padding(.vertical, 10)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
         .background(
             Color.white
                 .overlay(alignment: .top) {
@@ -3227,7 +3266,8 @@ struct CategoryDetailView: View {
                 if success {
                     hiddenIDs.formUnion(chosen.map { $0.id })
                     selected.subtract(Set(chosen.map { $0.id }))
-                    showToast("已隐藏 \(chosen.count) 项 · 在「我的 › 已隐藏的照片」里可找回")
+                    noteHiddenCount(chosen.count)
+                    showToast("已隐藏 \(chosen.count) 项 · 取消隐藏要去「照片」App 的「已隐藏」")
                 } else {
                     message = "隐藏失败：" + (error?.localizedDescription ?? "未知原因")
                 }
@@ -3308,7 +3348,7 @@ struct SettingsTabView: View {
                                 Text("已隐藏的照片")
                                     .font(.system(size: 15))
                                     .foregroundColor(.primary)
-                                Text("在隐私组点过「隐藏」的条目都在这里，可以取消隐藏")
+                                Text("隐藏过的都在系统「已隐藏」里；iOS 16 起 App 读不到，只能去那边取消")
                                     .font(.system(size: 11.5))
                                     .foregroundColor(.secondary)
                                     .fixedSize(horizontal: false, vertical: true)
@@ -3440,7 +3480,7 @@ struct SettingsTabView: View {
                     divider
                     faqRow(q: "删错了能找回吗？", a: "能。删除是删到系统「最近删除」，30 天内在照片 App 里可以恢复。")
                     divider
-                    faqRow(q: "「隐藏」和「删除」有什么区别？", a: "隐藏不删照片，只是放进系统「已隐藏」相簿（iOS 16 起打开要 Face ID），占用空间不变；删除会进「最近删除」，30 天内可恢复。隐藏的能在「我的 › 已隐藏的照片」里取消。")
+                    faqRow(q: "「隐藏」和「删除」有什么区别？", a: "隐藏不删照片，只是放进系统「已隐藏」相簿（有 Face ID 锁），占用空间不变。但 iOS 16 起 Apple 不让第三方 App 读那个相簿，所以取消隐藏只能去「照片」App 手动操作。删除会进「最近删除」，30 天内可恢复。")
                     divider
                     faqRow(q: "隐私分类为什么有误判？", a: "隐私是概率粗筛（排除人脸后的裸露密度），分不清泳装和内衣。它不进建议清理，全选也带不走。")
                     divider
@@ -3700,6 +3740,11 @@ struct HiddenAssetsView: View {
     @State private var busy = false
     @State private var message: String?
 
+    /// 这个 App 累计隐藏过多少张。只用来区分空态文案：
+    /// 从没隐藏过 → 这篇说明可以忽略；隐藏过 → 明确告诉他去系统相册找。
+    /// 不能靠 `assets.isEmpty` 判断，因为 iOS 16 起**永远是空**。
+    @AppStorage("hiddenEverCount") private var hiddenEverCount: Int = 0
+
     private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
     private var side: CGFloat { max(72, (UIScreen.main.bounds.width - 24 - 12) / 3) }
 
@@ -3712,7 +3757,7 @@ struct HiddenAssetsView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
                     if assets.isEmpty {
-                        emptyState
+                        systemLimitState
                     } else {
                         Text("系统「已隐藏」相簿里共 \(assets.count) 项。取消隐藏后会回到系统相册，重新扫描一次就会重新出现在分类里。")
                             .font(.system(size: 11.5))
@@ -3773,20 +3818,73 @@ struct HiddenAssetsView: View {
         .onAppear(perform: reload)
     }
 
-    private var emptyState: some View {
-        VStack(spacing: 8) {
-            Image(systemName: "eye.slash")
-                .font(.system(size: 30))
-                .foregroundColor(.secondary.opacity(0.55))
-            Text("没有已隐藏的照片")
-                .font(.system(size: 15, weight: .medium))
-            Text("在隐私组选中照片后点「隐藏」，它们会出现在这里。")
-                .font(.system(size: 12))
+    /// 读不到内容时**不能**说「没有已隐藏的照片」。
+    ///
+    /// iOS 16 起，只要用户开着「用 Face ID 查看已隐藏相簿」（默认就是开的），
+    /// 系统给第三方 App 返回的就是一个**空**相簿。照片还在，只是 App 拿不到。
+    /// 这里必须把这条限制讲明白，并给一条能走通的出口（跳系统相册）。
+    private var systemLimitState: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 10) {
+                Image(systemName: "lock.shield")
+                    .font(.system(size: 22))
+                    .foregroundColor(Color(red: 0.9, green: 0.5, blue: 0.1))
+                Text("照片还在，是这个 App 读不到")
+                    .font(.system(size: 16, weight: .semibold))
+            }
+
+            Text("iOS 16 起，系统把「已隐藏」相簿锁在 Face ID 后面。为了不让第三方 App 绕过这把锁，Apple 直接给 App 返回一个「空」相簿——不是这里没做，是系统不允许。")
+                .font(.system(size: 13))
                 .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
+                .lineSpacing(3)
+
+            Text(hiddenEverCount > 0
+                 ? "你隐藏过的 \(hiddenEverCount) 张都在「照片」App 的「已隐藏」里。取消隐藏也只能在那边操作，取消后回来重新扫一次，它们会回到分类里。"
+                 : "如果你确实没隐藏过任何照片，这段话可以忽略。以后隐藏的照片都会进「照片」App 的「已隐藏」相簿。")
+                .font(.system(size: 13))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+                .lineSpacing(3)
+
+            Button {
+                openPhotosApp()
+            } label: {
+                Text("打开系统「照片」App")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundColor(.white)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 13)
+                    .background(blue)
+                    .cornerRadius(10)
+            }
+            .buttonStyle(.plain)
+            .accessibilityIdentifier("hidden-open-photos")
+
+            Text("在「照片」里点底部的「相簿」，往下找到「已隐藏」，用 Face ID 打开。")
+                .font(.system(size: 11.5))
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 60)
+        .padding(16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white)
+        .cornerRadius(14)
+        .padding(.top, 10)
+    }
+
+    /// `photos-redirect://` 是系统相册的公开入口，`open` 不需要在
+    /// Info.plist 里声明 `LSApplicationQueriesSchemes`（`canOpenURL` 才需要）。
+    /// 没有直达「已隐藏」相簿的 scheme，只能落到照片 App 首页再让用户点两下。
+    private func openPhotosApp() {
+        guard let url = URL(string: "photos-redirect://") else { return }
+        UIApplication.shared.open(url, options: [:]) { ok in
+            if !ok {
+                DispatchQueue.main.async {
+                    message = "打不开「照片」App，请回到主屏幕手动打开。"
+                }
+            }
+        }
     }
 
     private var unhideBar: some View {
@@ -3918,6 +4016,17 @@ func appVersionLine() -> String {
     let short = info?["CFBundleShortVersionString"] as? String ?? "?"
     let build = info?["CFBundleVersion"] as? String ?? "?"
     return "版本 \(short)（构建号 \(build)）"
+}
+
+/// 累计隐藏过多少张。只有一个读者：`HiddenAssetsView` 的空态文案。
+///
+/// 为什么需要它：iOS 16 起第三方 App 读系统「已隐藏」相簿**永远是空**，
+/// 所以「读到 0 条」既可能是真的没藏过，也可能是系统锁着。这个计数
+/// 让我们能分清，至少别对藏过 20 张的人说「你没有隐藏过照片」。
+func noteHiddenCount(_ n: Int) {
+    guard n > 0 else { return }
+    let key = "hiddenEverCount"
+    UserDefaults.standard.set(UserDefaults.standard.integer(forKey: key) + n, forKey: key)
 }
 
 // MARK: - 空间统计（一份口径，两个读者）

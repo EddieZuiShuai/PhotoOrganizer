@@ -339,22 +339,46 @@ private struct LivePhotoStage: View {
     @State private var token = UUID()
 
     var body: some View {
-        ZStack {
-            ZoomableImageView(asset: asset, interactionEnabled: !model.isPlaying)
+        // 尺寸必须和 `ZoomableImageView` 对齐，否则动态层会跑偏：
+        // 那边是「全屏 GeometryReader + ignoresSafeArea + scaledToFit」，
+        // 这边如果直接把 `PHLivePhotoView` 丢进 ZStack，它会拿到 TabView 页面的
+        // 安全区尺寸，再按自己的方式缩放——播放时就会在照片上方露出一条重复内容
+        // （1.5(27) 真机反馈）。所以这里自己按 asset 的宽高比算出 fit 后的矩形，
+        // 精确设成动态层的 frame，再加 clipped 兜住像素级溢出。
+        GeometryReader { geo in
+            let fitted = fittedSize(in: geo.size)
+            ZStack {
+                ZoomableImageView(asset: asset, interactionEnabled: !model.isPlaying)
 
-            if let photo = photo {
-                LivePhotoSurface(photo: photo, model: model)
-                    .opacity(model.isPlaying ? 1 : 0)
-                    .allowsHitTesting(false)
-                    .animation(.easeInOut(duration: 0.14), value: model.isPlaying)
+                if let photo = photo {
+                    LivePhotoSurface(photo: photo, model: model)
+                        .frame(width: fitted.width, height: fitted.height)
+                        .clipped()
+                        .opacity(model.isPlaying ? 1 : 0)
+                        .allowsHitTesting(false)
+                        .animation(.easeInOut(duration: 0.14), value: model.isPlaying)
+                }
             }
+            .frame(width: geo.size.width, height: geo.size.height)
         }
+        .ignoresSafeArea()
         .onAppear {
             if isActive { start() }
         }
         .onChange(of: isActive) { active in
             if active { start() } else { teardown() }
         }
+    }
+
+    /// 按照片的原始宽高比，在给定容器里算 `scaledToFit` 之后的显示尺寸。
+    /// 用 `asset.pixelWidth/pixelHeight` 而不是等图片加载完再量：
+    /// 这两个值来自元数据，永远有，不用等 iCloud。
+    private func fittedSize(in size: CGSize) -> CGSize {
+        let w = CGFloat(asset.pixelWidth)
+        let h = CGFloat(asset.pixelHeight)
+        guard w > 0, h > 0, size.width > 0, size.height > 0 else { return size }
+        let ratio = min(size.width / w, size.height / h)
+        return CGSize(width: w * ratio, height: h * ratio)
     }
 
     private func start() {
