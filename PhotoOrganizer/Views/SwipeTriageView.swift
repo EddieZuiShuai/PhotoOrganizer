@@ -391,6 +391,11 @@ struct TriageMedia: View {
                     stopLive()
                 }
             }
+            .onChange(of: revealed) { _ in
+                // 打码状态下不自动播（糊着动起来只会让人以为卡了），
+                // 点了「看原图」才补上那一次播放。
+                if isActive { startLiveIfNeeded() }
+            }
         }
     }
 
@@ -457,6 +462,8 @@ struct TriageMedia: View {
 
     private func startLiveIfNeeded() {
         guard !item.isVideo, item.isLivePhoto else { return }
+        // 还糊着就别播：一段糊掉的画面在动，看起来更像卡住了
+        guard !hid else { return }
         live.stop()
         live.markReady(false)
         guard livePhoto == nil, !liveLoading else {

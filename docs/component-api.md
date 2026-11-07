@@ -14,6 +14,7 @@
 | `asset` | `PHAsset` | 真实资源，取图 / 删除都从这里走 |
 | `creationDate` / `pixelWidth` / `pixelHeight` | | 来自 `PHAsset` |
 | `isScreenshot` / `isVideo` | `Bool` | 来自 `mediaSubtypes` / `mediaType` |
+| `isLivePhoto` | `Bool`（**计算属性**） | 现算 `asset.mediaSubtypes.contains(.photoLive)`。**故意不进缓存**：只是位掩码，取一次是常数开销；存进 `CachedPhoto` 反而要加字段、做可选解码、想清楚要不要升信号版本 |
 | `dHash` | `UInt64?` | 64 位差分哈希。`nil` = 没算出来（视频、缩略图失败） |
 | `sharpness` | `Double?` | 对比度拉伸后的拉普拉斯方差。`nil` = 没测 |
 | `sharpnessScore` | `Double` | 0~100 展示分，**`-1` 表示未测**（不要当 0 用） |
@@ -163,10 +164,14 @@ func compress(asset: PHAsset, completion: @escaping (Result<Outcome, Error>) -> 
 | `TutorialView` + 5 个 Mock | `TutorialView.swift` | 新手教程 5 页；Mock 全部假数据，不引用 `AnalysisResult` |
 | `SpaceStats` | `ContentView.swift` | 体积统计单一口径（结果页与空间 tab 共用） |
 | `SpaceDashboardView` / `FilterSheet` | `DashboardView.swift` | 体积看板（tab 页，不再是 sheet）/ 时间段与相册筛选 |
-| `SwipeTriageView` / `TriageMedia` | `SwipeTriageView.swift` | 逐张过主界面 / 卡片媒体（照片 fit、视频可播） |
+| `SwipeTriageView` / `TriageMedia` | `SwipeTriageView.swift` | 逐张过主界面 / 卡片媒体（照片 fit、视频可播、Live 自动播一次）。`blurred: true` 时先糊住，中央一个「点一下看原图」 |
 | `TriageVideoBox` | `SwipeTriageView.swift` | 单卡片视频播放器，划走即停 |
+| `TriageProgressStore` | `SwipeTriageView.swift` | 逐张过进度（判过的 id + 待删标记），按上下文 key 存 UserDefaults |
 | `TriageImageCache` / `TriageMetrics` | `SwipeTriageView.swift` | 预取缓存（30 张，跳过视频）/ 统一取图尺寸 |
+| `TriageEntryBar` | `ContentView.swift` | 「逐张过 N 项」入口条，清理页与分类页共用。有进度时右侧显示「已看 M · 继续」 |
 | `PhotoPreviewView` / `ZoomableImageView` / `VideoPlaybackModel` | `PhotoPreviewView.swift` | 大图 / 缩放 / 视频播放 |
+| `LivePhotoModel` / `LivePhotoSurface` / `LivePhotoLoader` | `PhotoPreviewView.swift` | Live 播放状态（token 驱动）/ `PHLivePhotoView` 包装（禁手势）/ 取图。`LivePhotoSurface` 也用在逐张过卡片里 |
+| `LivePhotoStage` | `PhotoPreviewView.swift`（private） | 预览里的一页 Live：静帧可缩放 + 动态层叠加，只给当前页装载 |
 
 ### 单例与持久化
 
@@ -174,6 +179,7 @@ func compress(asset: PHAsset, completion: @escaping (Result<Outcome, Error>) -> 
 |---|---|---|
 | `BlurIgnoreStore.shared` | `UserDefaults["blurIgnoredIDs"]` | 手动排除的模糊照片 id，上限 5000 |
 | `TriageImageCache.shared` | `NSCache`（countLimit 30） | 逐张过图片缓存；视频不走这里（封面单独取） |
+| `TriageProgressStore.shared` | `UserDefaults["triageProgress.v1"]` | 逐张过进度：`key → {judged:[id], marked:[id], updatedAt}`。单上下文上限 5000 条、最多 8 个上下文、30 天过期；攒 2 秒落盘，`flush()` 兜底 |
 | `ScreenAwake.shared` | 运行时 | 引用计数式屏幕常亮，`setScanning` / `setAppActive` 两个开关 |
 
 ## 新增功能的推荐改法
