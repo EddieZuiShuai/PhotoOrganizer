@@ -106,7 +106,7 @@
 
 ### 1.5 (30) · 2026-11-08
 
-- **iCloud 重复核对改「永不联网」（A 方案）**：`originalData()` 拆成 `originalBytes(of:allowNetwork:)`，默认 `allowNetwork = false`。`findExactGroups` 不再对候选对读原图算 SHA-256，改成「本地 dHash 强候选（距离 ≤3 + 文件大小相同）→ 标成 `PendingDuplicateGroup` 待核对」。新增 `AnalysisResult.unverifiedExactGroups`，清理页顶部给「有 N 组待核对」提示 + 用户手动点「联网核对」才下载原图。全项目仅剩详情页大图（`loadImage`）一处联网。
+- **iCloud 重复核对改「永不联网」（A 方案）**：`originalData()` 拆成 `originalBytes(of:allowNetwork:)`，默认 `allowNetwork = false`。`findExactGroups` 不再对候选对读原图算 SHA-256，改成「本地 dHash 强候选（距离 ≤3 + 文件大小相同）→ 标成 `PendingDuplicateGroup` 待核对」。新增 `AnalysisResult.unverifiedExactGroups`。**待核对入口（本轮补全）**：清理页顶部「重复组」卡片右上角标 `+N` 角标（有待核对时出现）；重复页顶部一条橙色横幅「有 N 组看着一模一样 + 联网核对」，点按钮先弹确认（显示要下载几张原图）→ 后台 `verifyPendingDuplicates` 下载原图算 SHA-256（带进度）→ 成立的并入重复组、不成立的丢弃，横幅随核对完成消失。全项目仅剩详情页大图（`loadImage`）一处联网。
 - **去掉批量「隐藏 N 张」**：清理页（`ResultView`）和分类详情页（`CategoryDetailView`）的底栏都回到「取消选中 / 删除」两键，删除 `confirmHide`、`hideSelected()` 死代码。隐藏只留两条单张路径：大图预览那颗、逐张过那颗；`hideOne` 统一成带 `completion` 回调（成功关预览、失败在预览顶部浮一行字）。
 - **3072 不自动重试**：`setHidden` 去掉 `apply(retried:)` 自动重试层，直接单次 `performChanges`；`friendlyPhotoError` 3072 文案缩短成「系统把这次操作取消了，再点一次就好」。
 - **L1 单元测试 target**：新增 `PhotoOrganizerTests`（hosted unit test），手改 `project.pbxproj` + scheme 的 TestAction。四个纯逻辑测试：`UnionFind`（传递性合并）、`hammingDistance`（汉明距离边界）、`ContentCategory`（隐私/强弱结论/旧名迁移）、`friendlyPhotoError`（3072 不泄漏）。

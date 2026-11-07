@@ -651,6 +651,15 @@ struct ResultView: View {
 
     @State private var toast: String?
 
+    /// 联网核对（1.5(30) A 方案）：已核对过的「待核对组」id，核对后从列表里摘掉。
+    @State private var verifiedPendingIDs: Set<String> = []
+    /// 联网核对后确认「真是重复」的组，并进「重复」页一起展示。
+    @State private var verifiedGroups: [PhotoGroup] = []
+    /// 是否弹「联网核对」确认框、以及核对是否进行中（进行中禁用按钮、显示进度）。
+    @State private var confirmVerify = false
+    @State private var verifying = false
+    @State private var verifyProgress: (Int, Int)?
+
     /// 一次选中太多张时先问一句。
     /// 起因：建议清理页右上角点一下「全选 2779」，底部按钮立刻变成「删除 2779 张」，
     /// 中间没有任何缓冲；而建议里本来就混着误判，点错的代价太大。
@@ -805,6 +814,16 @@ struct ResultView: View {
         } message: {
             Text("转成 720p 后存成相册里的新视频；紧接着系统会再问一次「是否删除原片」，点「删除」才算替换完成。大视频要几分钟，期间别锁屏。")
         }
+        .confirmationDialog(
+            "联网核对 \(pendingGroups.count) 组？",
+            isPresented: $confirmVerify,
+            titleVisibility: .visible
+        ) {
+            Button("开始核对（会联网）") { runDuplicateVerify() }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("会从 iCloud 下载 \(pendingDownloadCount) 张原图来比对。扫描本身从不联网，这一步只在你点了「开始核对」之后才发生。")
+        }
         .onChange(of: albumChoice) { choice in
             reloadAlbumIDs(choice)
         }
@@ -914,7 +933,18 @@ struct ResultView: View {
     }
 
     private var dupGroups: [PhotoGroup] {
-        result.duplicateGroups.compactMap { alive($0) }
+        (result.duplicateGroups + verifiedGroups).compactMap { alive($0) }
+    }
+
+    /// 待核对组：扫描时不联网，只做外观比对（dHash 极近 + 文件大小相同），
+    /// 用户点「联网核对」才真下载原图算 SHA-256。核对过的组从里面摘掉。
+    private var pendingGroups: [PendingDuplicateGroup] {
+        result.unverifiedExactGroups.filter { !verifiedPendingIDs.contains($0.id) }
+    }
+
+    /// 核对这 N 组一共要下载多少张原图（每组每个成员一张）。
+    private var pendingDownloadCount: Int {
+        pendingGroups.reduce(0) { $0 + $1.downloadCount }
     }
 
     private var simGroups: [PhotoGroup] {
@@ -1059,7 +1089,7 @@ struct ResultView: View {
 
             HStack(spacing: 8) {
                 summaryItem(title: "建议清理", value: "\(suggested.count)", color: Color(red: 0.85, green: 0.25, blue: 0.2))
-                summaryItem(title: "重复组", value: "\(dupGroups.count)", color: Color(red: 0.85, green: 0.45, blue: 0.15))
+                summaryItem(title: "重复组", value: "\(dupGroups.count)", color: Color(red: 0.85, green: 0.45, blue: 0.15), badge: pendingGroups.isEmpty ? nil : "+\(pendingGroups.count)")
                 summaryItem(title: "相似组", value: "\(simGroups.count)", color: Color(red: 0.1, green: 0.5, blue: 0.65))
                 summaryItem(title: "截图", value: "\(shots.count)", color: Color(red: 0.4, green: 0.45, blue: 0.5))
             }
@@ -1204,7 +1234,7 @@ struct ResultView: View {
         return s
     }
 
-    private func summaryItem(title: String, value: String, color: Color) -> some View {
+    private func summaryItem(title: String, value: String, color: Color, badge: String? = nil) -> some View {
         VStack(spacing: 2) {
             Text(value)
                 .font(.system(size: 20, weight: .semibold))
@@ -1217,6 +1247,17 @@ struct ResultView: View {
         .padding(.vertical, 10)
         .background(Color.white)
         .cornerRadius(10)
+        .overlay(alignment: .topTrailing) {
+            if let badge = badge {
+                Text(badge)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 2)
+                    .background(Capsule().fill(Color.orange))
+                    .padding(5)
+            }
+        }
     }
 
     private var chips: some View {
@@ -1416,8 +1457,13 @@ struct ResultView: View {
         if isGroupTab {
             LazyVStack(spacing: 10) {
                 if tab == .duplicate {
+                    if !pendingGroups.isEmpty {
+                        verifyBanner
+                    }
                     if dupGroups.isEmpty {
-                        emptyHint("没有发现完全相同的照片", icon: "checkmark.circle")
+                        if pendingGroups.isEmpty {
+                            emptyHint("没有发现完全相同的照片", icon: "checkmark.circle")
+                        }
                     } else {
                         ForEach(Array(dupGroups.enumerated()), id: \.element.id) { index, group in
                             groupCard(group: group, index: index + 1)
@@ -2108,6 +2154,68 @@ struct ResultView: View {
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) {
             if toast == text {
                 toast = nil
+            }
+        }
+    }
+
+    /// 重复页顶部的「待核对」横幅：提示有 N 组看着像重复、但原图在 iCloud，
+    /// 点「联网核对」才下载原图比对。核对进行中换成进度。
+    private var verifyBanner: some View {
+        HStack(spacing: 10) {
+            VStack(alignment: .leading, spacing: 3) {
+                if verifying, let (done, total) = verifyProgress {
+                    Text("正在核对 \(min(done + 1, total))/\(total) 组…")
+                        .font(.system(size: 13, weight: .medium))
+                } else {
+                    Text("有 \(pendingGroups.count) 组看着一模一样")
+                        .font(.system(size: 13, weight: .medium))
+                }
+                Text("原图还在 iCloud，点「联网核对」才下载下来比对")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+            }
+            Spacer(minLength: 8)
+            Button {
+                confirmVerify = true
+            } label: {
+                Text(verifying ? "核对中…" : "联网核对")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundColor(.white)
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 7)
+                    .background(Capsule().fill(Color.orange))
+            }
+            .buttonStyle(.plain)
+            .disabled(verifying)
+            .accessibilityIdentifier("verify-duplicates")
+        }
+        .padding(12)
+        .background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.3), lineWidth: 0.5))
+    }
+
+    /// 用户点了「开始核对」之后走这里：后台下载原图算 SHA-256，成立的并进重复组。
+    private func runDuplicateVerify() {
+        let pending = pendingGroups
+        guard !pending.isEmpty else { return }
+        verifying = true
+        verifyProgress = (0, pending.count)
+        DispatchQueue.global(qos: .userInitiated).async {
+            let confirmed = AnalysisEngine.shared.verifyPendingDuplicates(pending) { done, total in
+                DispatchQueue.main.async {
+                    verifyProgress = (done, total)
+                }
+            }
+            DispatchQueue.main.async {
+                verifying = false
+                verifyProgress = nil
+                verifiedPendingIDs.formUnion(pending.map { $0.id })
+                verifiedGroups.append(contentsOf: confirmed)
+                if confirmed.isEmpty {
+                    showToast("核对完成：这几组其实不是重复，已忽略")
+                } else {
+                    showToast("核对完成：\(confirmed.count) 组确认是重复")
+                }
             }
         }
     }
