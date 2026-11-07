@@ -157,6 +157,16 @@ struct PhotoItem: Identifiable {
     /// 是否已收藏（收藏的一律不推荐删）
     var isFavorite: Bool = false
 
+    /// 是不是 Live 照片。
+    ///
+    /// 特意做成**从 asset 现算**而不是扫描时存一个 Bool：
+    /// 它只是 PHAsset 上的一个位掩码，取一次是常数开销；存进缓存反而要在
+    /// `CachedPhoto` 里加字段、要给老缓存做可选解码、还要想清楚要不要升信号版本。
+    /// 这里零成本，且永远不会和系统状态不一致。
+    var isLivePhoto: Bool {
+        asset.mediaSubtypes.contains(.photoLive)
+    }
+
     var displayName: String {
         let f = DateFormatter()
         f.dateFormat = "yyyy-MM-dd HH:mm"

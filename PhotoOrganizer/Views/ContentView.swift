@@ -800,7 +800,9 @@ struct ResultView: View {
         .sheet(item: $triage) { request in
             SwipeTriageView(
                 title: request.title,
+                progressKey: request.progressKey,
                 items: request.items,
+                blurred: request.blurred,
                 onFinish: { marks in
                     guard !marks.isEmpty else { return }
                     selectedIDs.formUnion(marks)
@@ -1113,42 +1115,36 @@ struct ResultView: View {
     /// 3. 张数是这个入口最重要的信息（「过 3 张」和「过 800 张」是两件事），
     ///    tab 图标放不下数字。
     /// 所以保留在清理页，但升级成整行、带张数、带一行说明——从「隐藏小按钮」变成主路径。
+    ///
+    /// 1.5(26) 起这整行抽成 `TriageEntryBar`，和分类详情页共用同一份实现：
+    /// 两个入口的一致性靠「同一份代码」保证，而不是靠两处手抄得一样。
     @ViewBuilder
     private var triageBar: some View {
         let list = currentList()
         if !list.isEmpty {
-            Button {
+            TriageEntryBar(
+                count: list.count,
+                judgedCount: TriageProgressStore.shared.judgedCount(for: triageKey)
+            ) {
                 startTriage()
-            } label: {
-                HStack(spacing: 6) {
-                    Image(systemName: "hand.draw.fill")
-                        .font(.system(size: 12))
-                    Text("逐张过")
-                        .font(.system(size: 13, weight: .semibold))
-                    Text("\(list.count) 项")
-                        .font(.system(size: 13))
-                    Spacer(minLength: 4)
-                    Text("左右滑快速筛")
-                        .font(.system(size: 11))
-                        .foregroundColor(.secondary)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 10, weight: .semibold))
-                        .foregroundColor(.secondary)
-                }
-                .foregroundColor(blue)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 9)
-                .background(Color.white)
-                .cornerRadius(10)
-                .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
             .padding(.horizontal, 16)
             .padding(.top, 6)
-            // Maestro 按文字点，而这一行里有三个 Text。给整行一个精确的 label，
-            // 用例里的 `tapOn: "逐张过"` 才能全字命中（改文案时记得同批改 flow）。
-            .accessibilityLabel("逐张过")
-            .accessibilityIdentifier("triage-start")
+        }
+    }
+
+    /// 进度身份。只按「哪个 tab」分，不把时间段 / 相册拼进来：
+    /// 进度存的是 id 集合，跟筛选条件无关——你切到「近一年」时，
+    /// 已经判过的照片本来就不该再问一遍。清理页和分类页的同一个内容分类
+    /// 也故意共用一把 key，两边判过的进度是同一份。
+    private var triageKey: String {
+        switch tab {
+        case .suggested: return "clean.suggested"
+        case .duplicate: return "clean.duplicate"
+        case .similar: return "clean.similar"
+        case .blurry: return "clean.blurry"
+        case .large: return "clean.large"
+        case .content(let c): return "cat." + c.rawValue
         }
     }
 
@@ -2096,7 +2092,15 @@ struct ResultView: View {
             showToast("「\(tab.title)」里没有照片")
             return
         }
-        triage = TriageRequest(title: tab.title, items: list)
+        // 隐私组在逐张过里没有缩略图那一层遮挡，不自己糊就等于绕过了「打码」这个设置
+        var isPrivacyTab = false
+        if case .content(let c) = tab { isPrivacyTab = c.isPrivacy }
+        triage = TriageRequest(
+            title: tab.title,
+            items: list,
+            progressKey: triageKey,
+            blurred: isPrivacyTab && blurPrivacyThumbnails
+        )
     }
 
     private func loadAlbums() {
@@ -2238,6 +2242,63 @@ struct RefineBanner: View {
     }
 }
 
+// MARK: - 逐张过入口条（清理页与分类页共用）
+
+/// 一条「逐张过 N 项」的入口。
+///
+/// 抽出来是为了让两个入口**长得一样、说得一样、跳得一样**。
+/// 之前只有清理页有，分类页要加的时候如果复制一份，两边文案迟早会分叉。
+///
+/// 有进度时右侧从「左右滑快速筛」变成「已看 138 · 继续」：
+/// 用户需要知道点进去不会又从第一张开始。
+struct TriageEntryBar: View {
+    let count: Int
+    let judgedCount: Int
+    let action: () -> Void
+
+    private let blue = Color(red: 0.0, green: 0.48, blue: 1.0)
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "hand.draw.fill")
+                    .font(.system(size: 12))
+                Text("逐张过")
+                    .font(.system(size: 13, weight: .semibold))
+                Text("\(count) 项")
+                    .font(.system(size: 13))
+
+                Spacer(minLength: 4)
+
+                if judgedCount > 0 {
+                    Text("已看 \(min(judgedCount, count)) · 继续")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundColor(blue)
+                } else {
+                    Text("左右滑快速筛")
+                        .font(.system(size: 11))
+                        .foregroundColor(.secondary)
+                }
+
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundColor(.secondary)
+            }
+            .foregroundColor(blue)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(Color.white)
+            .cornerRadius(10)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        // Maestro 按文字点，而这一行里有三个 Text。给整行一个精确的 label，
+        // 用例里的 `tapOn: "逐张过"` 才能全字命中（改文案时记得同批改 flow）。
+        .accessibilityLabel("逐张过")
+        .accessibilityIdentifier("triage-start")
+    }
+}
+
 // MARK: - 分组里的可勾选缩略图
 
 struct SelectableThumb: View {
@@ -2328,6 +2389,7 @@ struct PhotoThumbView: View {
     @State private var image: UIImage?
 
     private var isVideo: Bool { asset.mediaType == .video }
+    private var isLivePhoto: Bool { asset.mediaSubtypes.contains(.photoLive) }
 
     private var durationLabel: String {
         let total = Int(asset.duration.rounded())
@@ -2365,6 +2427,21 @@ struct PhotoThumbView: View {
                         .font(.system(size: 7, weight: .bold))
                     Text(durationLabel.isEmpty ? "视频" : durationLabel)
                         .font(.system(size: 10, weight: .semibold))
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(Capsule().fill(Color.black.opacity(0.55)))
+                .padding(4)
+            } else if isLivePhoto {
+                // Live 角标和视频角标占同一个位置：一张素材不可能既是视频又是 Live，
+                // 所以不会撞。放左下角是因为右上角要留给「放大」按钮、右下角留给选中勾。
+                HStack(spacing: 3) {
+                    Image(systemName: "livephoto")
+                        .font(.system(size: 8, weight: .bold))
+                    Text("LIVE")
+                        .font(.system(size: 9, weight: .heavy))
+                        .tracking(0.3)
                 }
                 .foregroundColor(.white)
                 .padding(.horizontal, 5)
@@ -2829,6 +2906,7 @@ struct CategoryDetailView: View {
 
     @State private var selected: Set<String> = []
     @State private var previewTarget: PreviewTarget?
+    @State private var triage: TriageRequest?
     @State private var message: String?
     @State private var toast: String?
     @State private var videoFilter: VideoSizeFilter = .all
@@ -2894,6 +2972,21 @@ struct CategoryDetailView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.top, 40)
                 } else {
+                    // 和清理页同一条入口、同一份代码。传的是 alive（已过滤的当前列表），
+                    // 视频分类带着当前体积筛选——选了「≥100MB」就只过这些。
+                    TriageEntryBar(
+                        count: alive.count,
+                        judgedCount: TriageProgressStore.shared.judgedCount(for: triageKey)
+                    ) {
+                        triage = TriageRequest(
+                            title: category.rawValue,
+                            items: alive,
+                            progressKey: triageKey,
+                            blurred: category.isPrivacy && blurPrivacyThumbnails
+                        )
+                    }
+                    .padding(.bottom, 2)
+
                     LazyVGrid(columns: columns, spacing: 6) {
                         ForEach(alive) { item in
                             SelectableThumb(
@@ -2969,6 +3062,28 @@ struct CategoryDetailView: View {
                 delete([item])
             }
         }
+        .sheet(item: $triage) { request in
+            SwipeTriageView(
+                title: request.title,
+                progressKey: request.progressKey,
+                items: request.items,
+                blurred: request.blurred,
+                onFinish: { marks in
+                    guard !marks.isEmpty else { return }
+                    selected.formUnion(marks)
+                    showToast("已标 \(marks.count) 张待删，点下面红色按钮统一删除")
+                },
+                onDeleteMany: { items in
+                    delete(items)
+                }
+            )
+        }
+    }
+
+    /// 和清理页的同一个内容分类共用一把 key：在清理页判过的，
+    /// 到分类页不会从头再问一遍，反过来也一样。
+    private var triageKey: String {
+        "cat." + category.rawValue
     }
 
     private var privacyNote: String {

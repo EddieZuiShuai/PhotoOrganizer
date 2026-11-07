@@ -9,6 +9,143 @@ struct TriageRequest: Identifiable {
     let id = UUID()
     let title: String
     let items: [PhotoItem]
+    /// 这份列表的「进度身份」。同一个 tab / 同一个分类共用一份进度，
+    /// 所以清理页的「截图」和分类页的「截图」是同一份——判过的不会再问一遍。
+    let progressKey: String
+    /// 隐私组：卡片先糊住，点一下才看原图。别处一律 false。
+    var blurred: Bool = false
+}
+
+// MARK: - 逐张过的进度（判过的 id + 待删标记，落盘）
+
+/// 记住「哪些已经判断过」，而不是「看到第几张」。
+///
+/// 为什么不能存 index：列表是会变的——删了照片会缩、按时间排序会从最前面
+/// 插进新照片、切了筛选会换一整套。存 index 下次就落到一张完全不相干的照片上。
+/// 存 id 集合之后这三种变化都自然正确：判过的（无论保留还是待删）永远不再出现，
+/// 新照片一定没被判断过，所以一定排在最前面。
+///
+/// **待删标记必须一起存**：只存 judged 的话，一张标了待删的照片重启后会变成
+/// 「判过了但标记没了」——既不会重看，也不会被删，等于彻底漏掉。
+final class TriageProgressStore {
+    static let shared = TriageProgressStore()
+
+    private struct Entry: Codable {
+        var judged: [String]
+        var marked: [String]
+        var updatedAt: Date
+    }
+
+    private let storageKey = "triageProgress.v1"
+    /// 最多留 8 个上下文，超了丢最久没动的
+    private let maxContexts = 8
+    /// 单个上下文最多记 5000 条。实际只会装你真划过的那几百条，
+    /// 这个上限是防「把一万张截图全滑一遍」时 UserDefaults 无限膨胀。
+    private let maxIDs = 5000
+    private let maxAge: TimeInterval = 30 * 24 * 3600
+
+    private var entries: [String: Entry]
+    private var pendingSave: DispatchWorkItem?
+
+    private init() {
+        entries = [:]
+        guard let data = UserDefaults.standard.data(forKey: storageKey),
+              let decoded = try? JSONDecoder().decode([String: Entry].self, from: data)
+        else { return }
+        let cutoff = Date().addingTimeInterval(-maxAge)
+        entries = decoded.filter { $0.value.updatedAt > cutoff }
+    }
+
+    // MARK: 读
+
+    func judgedSet(for key: String) -> Set<String> {
+        Set(entries[key]?.judged ?? [])
+    }
+
+    func markedSet(for key: String) -> Set<String> {
+        Set(entries[key]?.marked ?? [])
+    }
+
+    func judgedCount(for key: String) -> Int {
+        entries[key]?.judged.count ?? 0
+    }
+
+    // MARK: 写
+
+    func record(key: String, judgedID: String, marked: Bool) {
+        var entry = entries[key] ?? Entry(judged: [], marked: [], updatedAt: Date())
+        if !entry.judged.contains(judgedID) {
+            entry.judged.append(judgedID)
+        }
+        if marked {
+            if !entry.marked.contains(judgedID) {
+                entry.marked.append(judgedID)
+            }
+        } else {
+            entry.marked.removeAll { $0 == judgedID }
+        }
+        if entry.judged.count > maxIDs {
+            entry.judged.removeFirst(entry.judged.count - maxIDs)
+            let kept = Set(entry.judged)
+            entry.marked.removeAll { !kept.contains($0) }
+        }
+        entry.updatedAt = Date()
+        entries[key] = entry
+        scheduleSave()
+    }
+
+    /// 照片真删掉了，进度里也别留着它们的 id
+    func remove(key: String, ids: [String]) {
+        guard !ids.isEmpty, var entry = entries[key] else { return }
+        let gone = Set(ids)
+        entry.judged.removeAll { gone.contains($0) }
+        entry.marked.removeAll { gone.contains($0) }
+        entry.updatedAt = Date()
+        entries[key] = entry
+        scheduleSave()
+    }
+
+    /// 撤销：这一张要重新判断。只删标记不够，还得把「判过」的记录退回去，
+    /// 否则下次进来它会当成已看过的直接跳过，用户再也没机会改主意。
+    func forget(key: String, id: String) {
+        guard var entry = entries[key] else { return }
+        entry.judged.removeAll { $0 == id }
+        entry.marked.removeAll { $0 == id }
+        entry.updatedAt = Date()
+        entries[key] = entry
+        scheduleSave()
+    }
+
+    func clear(key: String) {
+        guard entries.removeValue(forKey: key) != nil else { return }
+        scheduleSave()
+    }
+
+    // MARK: 落盘
+
+    /// 每划一张就写一次 UserDefaults 太浪费，攒 2 秒；退出时 `flush()` 兜底。
+    private func scheduleSave() {
+        pendingSave?.cancel()
+        let item = DispatchWorkItem { [weak self] in self?.save() }
+        pendingSave = item
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2, execute: item)
+    }
+
+    func flush() {
+        pendingSave?.cancel()
+        pendingSave = nil
+        save()
+    }
+
+    private func save() {
+        if entries.count > maxContexts {
+            let keep = entries.sorted { $0.value.updatedAt > $1.value.updatedAt }
+                .prefix(maxContexts)
+            entries = Dictionary(uniqueKeysWithValues: keep.map { ($0.key, $0.value) })
+        }
+        guard let data = try? JSONEncoder().encode(entries) else { return }
+        UserDefaults.standard.set(data, forKey: storageKey)
+    }
 }
 
 // MARK: - 统一的取图尺寸
@@ -184,28 +321,75 @@ final class TriageVideoBox: ObservableObject {
 struct TriageMedia: View {
     let item: PhotoItem
     let isActive: Bool
+    /// 隐私组：先糊住，点一下才看原图。
+    /// 逐张过里没有缩略图那一层的遮挡，不自己糊就等于绕过了「隐私打码」这个设置。
+    var blurred: Bool = false
 
     @StateObject private var video = TriageVideoBox()
+    @StateObject private var live = LivePhotoModel()
     @State private var image: UIImage?
     @State private var poster: UIImage?
     @State private var loading = false
+    @State private var revealed = false
+
+    @State private var livePhoto: PHLivePhoto?
+    @State private var liveLoading = false
+    @State private var liveToken = UUID()
+
+    private var hid: Bool { blurred && !revealed }
 
     var body: some View {
         GeometryReader { geo in
             ZStack {
                 Color.black.opacity(0.92)
 
-                if item.isVideo {
-                    videoLayer(geo: geo)
-                } else {
-                    imageLayer(geo: geo)
+                Group {
+                    if item.isVideo {
+                        videoLayer(geo: geo)
+                    } else if item.isLivePhoto {
+                        liveLayer(geo: geo)
+                    } else {
+                        imageLayer(geo: geo)
+                    }
+                }
+                .blur(radius: hid ? 18 : 0)
+                .animation(.easeOut(duration: 0.18), value: hid)
+
+                if hid {
+                    // 用 Button 而不是 tap 手势：卡片本身挂着拖拽手势，
+                    // 手势叠在一起时 tap 会被吞掉（视频那层踩过这个坑）。
+                    Button {
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        revealed = true
+                    } label: {
+                        VStack(spacing: 8) {
+                            Image(systemName: "eye.slash.fill")
+                                .font(.system(size: 26))
+                            Text("已打码 · 点一下看原图")
+                                .font(.system(size: 12, weight: .medium))
+                        }
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 20)
+                        .padding(.vertical, 16)
+                        .background(RoundedRectangle(cornerRadius: 14).fill(Color.black.opacity(0.5)))
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("triage-reveal")
                 }
             }
             .clipped()
-            .onAppear(perform: load)
+            .onAppear {
+                load()
+                if isActive { startLiveIfNeeded() }
+            }
             .onChange(of: isActive) { active in
                 // 划走就把播放器停掉：不停的话后台有好几个视频在同时解码
-                if !active { video.stop() }
+                if active {
+                    startLiveIfNeeded()
+                } else {
+                    video.stop()
+                    stopLive()
+                }
             }
         }
     }
@@ -222,6 +406,90 @@ struct TriageMedia: View {
         } else {
             ProgressView().tint(.white)
         }
+    }
+
+    // MARK: Live 照片
+
+    /// 静帧照常显示，动态层叠上去、只在播放的那几秒可见。
+    /// 播放规则和全屏预览完全一致：进场自动播一次、静音、播完停、
+    /// 点右上角 LIVE 重播一次。
+    @ViewBuilder
+    private func liveLayer(geo: GeometryProxy) -> some View {
+        ZStack {
+            imageLayer(geo: geo)
+
+            if let livePhoto = livePhoto {
+                LivePhotoSurface(photo: livePhoto, model: live)
+                    .opacity(live.isPlaying ? 1 : 0)
+                    .allowsHitTesting(false)
+                    .animation(.easeInOut(duration: 0.14), value: live.isPlaying)
+            }
+
+            if live.isReady {
+                VStack {
+                    HStack {
+                        Spacer()
+                        Button {
+                            live.playOnce()
+                        } label: {
+                            HStack(spacing: 3) {
+                                Image(systemName: "livephoto")
+                                    .font(.system(size: 9, weight: .bold))
+                                Text("LIVE")
+                                    .font(.system(size: 9, weight: .heavy))
+                                    .tracking(0.4)
+                            }
+                            .foregroundColor(.white)
+                            .padding(.horizontal, 7)
+                            .padding(.vertical, 4)
+                            .background(Capsule().fill(Color.black.opacity(0.45)))
+                            .overlay(Capsule().stroke(Color.white.opacity(0.5), lineWidth: 0.7))
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("重播 Live 照片")
+                    }
+                    Spacer()
+                }
+                .padding(10)
+            }
+        }
+    }
+
+    private func startLiveIfNeeded() {
+        guard !item.isVideo, item.isLivePhoto else { return }
+        live.stop()
+        live.markReady(false)
+        guard livePhoto == nil, !liveLoading else {
+            if livePhoto != nil {
+                live.markReady(true)
+                live.playOnce()
+            }
+            return
+        }
+        liveLoading = true
+        let myToken = UUID()
+        liveToken = myToken
+
+        LivePhotoLoader.load(asset: item.asset) { loaded in
+            guard liveToken == myToken else { return }
+            liveLoading = false
+            guard let loaded = loaded else { return }
+            livePhoto = loaded
+            live.markReady(true)
+            // 取图要几秒（iCloud）时用户可能已经划走，别在别的卡片上突然动起来
+            guard isActive else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                live.playOnce()
+            }
+        }
+    }
+
+    private func stopLive() {
+        live.reset()
+        liveToken = UUID()
+        liveLoading = false
+        // 放掉视频轨，不然划过的每一张 Live 都会一直占着内存
+        livePhoto = nil
     }
 
     // MARK: 视频
@@ -361,6 +629,10 @@ struct TriageMedia: View {
 
 struct SwipeTriageView: View {
     let title: String
+    /// 这份列表的进度身份。同一个 tab / 同一个分类共用一份进度。
+    let progressKey: String
+    /// 隐私组：卡片先糊住，点一下才看原图
+    let blurred: Bool
     let onFinish: (Set<String>) -> Void
     /// 批量真删所有已标记的。列表那边负责落到系统相册并更新已删集合。
     let onDeleteMany: ([PhotoItem]) -> Void
@@ -370,16 +642,19 @@ struct SwipeTriageView: View {
     /// 进场时给的那一份是快照；删除会改变长度，所以这里维护一份可变的。
     @State private var list: [PhotoItem]
 
-    @State private var index: Int = 0
+    @State private var index: Int
     @State private var drag: CGSize = .zero
     /// 非 nil 表示这一张正在飞出（或撤销时正在飞回来）
     @State private var fly: CGSize?
     /// 飞出动画期间锁住输入，防止连点/连划导致跳张
     @State private var busy = false
     @State private var history: [Decision] = []
-    @State private var marks: Set<String> = []
+    @State private var marks: Set<String>
     @State private var hint: String?
     @State private var confirmBatchDelete = false
+    @State private var confirmReset = false
+    /// 进场时跳到的位置。>0 说明这次是「继续上次」
+    @State private var resumeFrom: Int
 
     private struct Decision {
         let id: String
@@ -394,14 +669,33 @@ struct SwipeTriageView: View {
 
     init(
         title: String,
+        progressKey: String,
         items: [PhotoItem],
+        blurred: Bool = false,
         onFinish: @escaping (Set<String>) -> Void,
         onDeleteMany: @escaping ([PhotoItem]) -> Void
     ) {
         self.title = title
+        self.progressKey = progressKey
+        self.blurred = blurred
         self.onFinish = onFinish
         self.onDeleteMany = onDeleteMany
         _list = State(initialValue: items)
+
+        // 进场位置不是 0，而是「第一张还没判断过的」。
+        // 这样新照片插到最前面会从它开始（它没判过），
+        // 中间删了几张也不会错位（判过的 id 不在列表里自然跳过）。
+        let judged = TriageProgressStore.shared.judgedSet(for: progressKey)
+        let start = items.firstIndex { !judged.contains($0.id) } ?? items.count
+        _index = State(initialValue: start)
+        _resumeFrom = State(initialValue: start)
+
+        // 待删标记也一起恢复：只恢复「判过」而不恢复「待删」的话，
+        // 一张标了待删的照片重启后会变成「判过了但标记没了」——既不会重看也不会被删。
+        let validIDs = Set(items.map { $0.id })
+        let restored = TriageProgressStore.shared.markedSet(for: progressKey)
+            .intersection(validIDs)
+        _marks = State(initialValue: restored)
     }
 
     var body: some View {
@@ -456,7 +750,12 @@ struct SwipeTriageView: View {
         }
         .statusBarHidden(true)
         .onAppear {
-            TriageImageCache.shared.preload(upcoming(0, 4))
+            // 从「第一张没判过的」开始，所以预取也要从这儿起，
+            // 不能固定从 0 开始——那是好几千张之前的事，白读一堆图。
+            TriageImageCache.shared.preload(upcoming(index, 4))
+            if resumeFrom > 0 {
+                showHint("已看 \(resumeFrom) 张，从第 \(resumeFrom + 1) 张继续")
+            }
         }
         .confirmationDialog(
             "删除已标记的 \(marks.count) 张？",
@@ -469,6 +768,16 @@ struct SwipeTriageView: View {
             Button("取消", role: .cancel) { }
         } message: {
             Text("直接从相册删除。30 天内在「最近删除」里可以恢复，但在这里没法撤销。")
+        }
+        .confirmationDialog(
+            "从头再筛一遍？",
+            isPresented: $confirmReset,
+            titleVisibility: .visible
+        ) {
+            Button("从头开始", role: .destructive) { resetToStart() }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("已经看过的 \(TriageProgressStore.shared.judgedCount(for: progressKey)) 张会回到开头，待删标记也会清掉。照片本身不受影响。")
         }
     }
 
@@ -486,6 +795,21 @@ struct SwipeTriageView: View {
                     .background(Circle().fill(Color.white.opacity(0.14)))
             }
             .accessibilityLabel("关闭逐张过")
+
+            // 只有真有过进度才给这个按钮：一张都没划过时它没有意义。
+            if TriageProgressStore.shared.judgedCount(for: progressKey) > 0 {
+                Button {
+                    confirmReset = true
+                } label: {
+                    Image(systemName: "arrow.counterclockwise")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 38, height: 38)
+                        .background(Circle().fill(Color.white.opacity(0.14)))
+                }
+                .accessibilityLabel("从头再筛一遍")
+                .accessibilityIdentifier("triage-reset")
+            }
 
             Spacer()
 
@@ -579,7 +903,7 @@ struct SwipeTriageView: View {
 
     private func cardBody(_ item: PhotoItem, width: CGFloat, isActive: Bool) -> some View {
         ZStack(alignment: .bottomLeading) {
-            TriageMedia(item: item, isActive: isActive)
+            TriageMedia(item: item, isActive: isActive, blurred: blurred)
 
             LinearGradient(
                 colors: [Color.clear, Color.black.opacity(0.72)],
@@ -595,6 +919,13 @@ struct SwipeTriageView: View {
                     if item.isVideo {
                         Text("视频")
                             .font(.system(size: 10, weight: .semibold))
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 2)
+                            .background(Capsule().fill(Color.white.opacity(0.25)))
+                    } else if item.isLivePhoto {
+                        Text("LIVE")
+                            .font(.system(size: 10, weight: .heavy))
+                            .tracking(0.4)
                             .padding(.horizontal, 6)
                             .padding(.vertical, 2)
                             .background(Capsule().fill(Color.white.opacity(0.25)))
@@ -840,6 +1171,9 @@ struct SwipeTriageView: View {
         } else {
             marks.insert(item.id)
         }
+        // 判过就落盘。「记 id 不记下标」的全部意义都在这一行：
+        // 下次进来按 id 找第一张没判过的，列表怎么变都不会错位。
+        TriageProgressStore.shared.record(key: progressKey, judgedID: item.id, marked: !keep)
 
         let startHeight = drag.height
         withAnimation(.easeOut(duration: 0.22)) {
@@ -869,6 +1203,8 @@ struct SwipeTriageView: View {
         let toDelete = list.filter { marks.contains($0.id) }
         let removed = toDelete.count
         onDeleteMany(toDelete)
+        // 照片已经不在相册里了，进度里留着这些 id 只会越积越长
+        TriageProgressStore.shared.remove(key: progressKey, ids: toDelete.map { $0.id })
 
         var instant = Transaction()
         instant.disablesAnimations = true
@@ -897,6 +1233,7 @@ struct SwipeTriageView: View {
         UIImpactFeedbackGenerator(style: .soft).impactOccurred()
 
         marks.remove(last.id)
+        TriageProgressStore.shared.forget(key: progressKey, id: last.id)
 
         let target = max(0, index - 1)
         let fromLeft = last.marked          // 刚才往左飞走的，就从左边回来
@@ -942,7 +1279,28 @@ struct SwipeTriageView: View {
     }
 
     private func finish() {
+        // 退出时兜底落盘：攒 2 秒的那一批可能还没写，用户手快关掉就丢了
+        TriageProgressStore.shared.flush()
         onFinish(marks)
         dismiss()
+    }
+
+    /// 清掉这份进度，从第一张重新看。照片本身一张不动，只是忘掉「看过哪几张」。
+    private func resetToStart() {
+        TriageProgressStore.shared.clear(key: progressKey)
+        UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+
+        var instant = Transaction()
+        instant.disablesAnimations = true
+        withTransaction(instant) {
+            index = 0
+            marks.removeAll()
+            history.removeAll()
+            fly = nil
+            drag = .zero
+            resumeFrom = 0
+        }
+        showHint("已从头开始")
+        TriageImageCache.shared.preload(upcoming(0, 4))
     }
 }

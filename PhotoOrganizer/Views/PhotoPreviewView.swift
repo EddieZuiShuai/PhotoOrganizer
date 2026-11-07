@@ -1,5 +1,6 @@
 import SwiftUI
 import Photos
+import PhotosUI
 import UIKit
 import AVFoundation
 import Combine
@@ -8,6 +9,9 @@ import Combine
 
 struct ZoomableImageView: View {
     let asset: PHAsset
+    /// Live 播放的那几秒把缩放手势关掉：动态层不跟着缩放，
+    /// 这时候还允许捏合，会看到「画面在动但尺寸不对」的错位。
+    var interactionEnabled: Bool = true
 
     @State private var image: UIImage?
     @State private var failed = false
@@ -42,6 +46,7 @@ struct ZoomableImageView: View {
             .frame(width: geo.size.width, height: geo.size.height)
             .clipped()
             .onAppear { load(size: geo.size) }
+            .allowsHitTesting(interactionEnabled)
         }
         .ignoresSafeArea()
     }
@@ -156,6 +161,237 @@ private struct PlayerSurface: UIViewRepresentable {
         if uiView.playerLayer.player !== player {
             uiView.playerLayer.player = player
         }
+    }
+}
+
+// MARK: - Live 照片（PHLivePhotoView 封装）
+
+/// Live 照片的播放状态。
+///
+/// 和视频共用同一套心智：进场自动播一次、默认静音、播完停在定格不循环、
+/// 点按钮重播一次。区别只有两点：Live 没有进度条（一共三秒），
+/// 以及「重播」长成一个 LIVE 胶囊。
+///
+/// 指令用 token 传，不直接持有 UIView：SwiftUI 每次重建都换实例，
+/// 存引用会在翻页后指向一个已经不在屏幕上的 view。token 是纯数据，
+/// 谁挂上去谁执行，翻页和重建都不会错位。
+final class LivePhotoModel: ObservableObject {
+    /// 静音在**一次预览会话内共享**：视频里开过声音，翻到 Live 也有声。
+    @Published var isMuted = true
+    @Published private(set) var isPlaying = false
+    /// 当前页的动态部分有没有装上。没装上（iCloud 没下来 / 只有静帧）就不显示 LIVE 按钮。
+    @Published private(set) var isReady = false
+
+    /// 每 +1 = 「播一次」。UIViewRepresentable 在 updateUIView 里比对这两个数。
+    @Published fileprivate(set) var playToken = 0
+    /// 每 +1 = 「停下并释放」
+    @Published fileprivate(set) var stopToken = 0
+
+    func playOnce() {
+        guard isReady else { return }
+        playToken &+= 1
+    }
+
+    func stop() {
+        stopToken &+= 1
+        isPlaying = false
+    }
+
+    func reset() {
+        stop()
+        isReady = false
+    }
+
+    func markReady(_ ready: Bool) {
+        isReady = ready
+        if !ready { isPlaying = false }
+    }
+
+    fileprivate func setPlaying(_ value: Bool) {
+        if isPlaying != value { isPlaying = value }
+    }
+
+    func toggleMute() {
+        isMuted.toggle()
+    }
+}
+
+/// PHLivePhotoView 的 SwiftUI 包装。
+///
+/// ⚠️ 两个必须做的手势隔离：
+/// 1. `isUserInteractionEnabled = false` —— PHLivePhotoView 自带一个
+///    `playbackGestureRecognizer`，留着它会把 TabView 的翻页和双指缩放全吃掉。
+/// 2. `playbackGestureRecognizer.isEnabled = false` —— 兜底，有些系统版本上
+///    只关交互它仍然会参与手势仲裁。
+/// 播放一律由我们主动下指令，不依赖用户手势。
+struct LivePhotoSurface: UIViewRepresentable {
+    let photo: PHLivePhoto
+    @ObservedObject var model: LivePhotoModel
+
+    func makeUIView(context: Context) -> PHLivePhotoView {
+        let view = PHLivePhotoView()
+        view.contentMode = .scaleAspectFit
+        view.isMuted = model.isMuted
+        view.isUserInteractionEnabled = false
+        view.playbackGestureRecognizer.isEnabled = false
+        view.delegate = context.coordinator
+        view.livePhoto = photo
+        return view
+    }
+
+    func updateUIView(_ view: PHLivePhotoView, context: Context) {
+        let c = context.coordinator
+
+        if view.livePhoto !== photo {
+            view.livePhoto = photo
+            // 换了一条 Live：把游标对齐到当前 token，
+            // 否则上一页残留的 playToken 会把这新的一条立刻播起来。
+            c.lastPlay = model.playToken
+            c.lastStop = model.stopToken
+        }
+
+        if view.isMuted != model.isMuted {
+            view.isMuted = model.isMuted
+        }
+
+        // 先 stop 再 play。从一张 Live 划到另一张时，上一页的 stop
+        // 和这一页的 play 可能落在同一帧里，顺序反了就变成「刚播就停」。
+        if c.lastStop != model.stopToken {
+            c.lastStop = model.stopToken
+            view.stopPlayback(animated: false)
+        }
+
+        if c.lastPlay != model.playToken {
+            c.lastPlay = model.playToken
+            // 先 stop 归零：不加这句，播放中再点会「接着播」而不是从头重播。
+            view.stopPlayback(animated: false)
+            view.startPlayback(with: .full)
+            DispatchQueue.main.async {
+                self.model.setPlaying(true)
+            }
+        }
+    }
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(model: model)
+    }
+
+    final class Coordinator: NSObject, PHLivePhotoViewDelegate {
+        private let model: LivePhotoModel
+        fileprivate var lastPlay = 0
+        fileprivate var lastStop = 0
+
+        init(model: LivePhotoModel) {
+            self.model = model
+        }
+
+        /// `.full` 播完就停，不会循环；这里只负责把按钮状态改回来。
+        func livePhotoView(
+            _ livePhotoView: PHLivePhotoView,
+            didEndPlaybackWith playbackStyle: PHLivePhotoViewPlaybackStyle,
+            animated: Bool
+        ) {
+            DispatchQueue.main.async {
+                self.model.setPlaying(false)
+            }
+        }
+    }
+}
+
+/// 取一段 Live 的动态部分。
+///
+/// 尺寸给「屏幕点 × scale」：给小了发糊，给大了首帧明显变慢。
+/// `isNetworkAccessAllowed` 必须开——只存在 iCloud 上的 Live 才会自动下载，
+/// 否则用户看到的永远是定格，还以为是 App 坏了。
+enum LivePhotoLoader {
+    static func load(asset: PHAsset, completion: @escaping (PHLivePhoto?) -> Void) {
+        let screen = UIScreen.main.bounds.size
+        let scale = UIScreen.main.scale
+        let target = CGSize(width: max(screen.width, 1) * scale,
+                            height: max(screen.height, 1) * scale)
+        let options = PHLivePhotoRequestOptions()
+        options.deliveryMode = .highQualityFormat
+        options.isNetworkAccessAllowed = true
+        PHImageManager.default().requestLivePhoto(
+            for: asset,
+            targetSize: target,
+            contentMode: .aspectFit,
+            options: options
+        ) { photo, _ in
+            DispatchQueue.main.async {
+                completion(photo)
+            }
+        }
+    }
+}
+
+/// 全屏预览里的一页 Live：静帧照常可缩放，动态层叠在上面，只在播放的那几秒显示。
+///
+/// 只给「当前这一页」装载：一段 Live 的视频轨 2~5MB，一排全装必爆内存。
+private struct LivePhotoStage: View {
+    let asset: PHAsset
+    let isActive: Bool
+    @ObservedObject var model: LivePhotoModel
+
+    @State private var photo: PHLivePhoto?
+    @State private var loading = false
+    /// 加载是异步的，翻页后回来的结果必须丢掉
+    @State private var token = UUID()
+
+    var body: some View {
+        ZStack {
+            ZoomableImageView(asset: asset, interactionEnabled: !model.isPlaying)
+
+            if let photo = photo {
+                LivePhotoSurface(photo: photo, model: model)
+                    .opacity(model.isPlaying ? 1 : 0)
+                    .allowsHitTesting(false)
+                    .animation(.easeInOut(duration: 0.14), value: model.isPlaying)
+            }
+        }
+        .onAppear {
+            if isActive { start() }
+        }
+        .onChange(of: isActive) { active in
+            if active { start() } else { teardown() }
+        }
+    }
+
+    private func start() {
+        model.stop()
+        model.markReady(false)
+        guard photo == nil, !loading else {
+            // 已经装好了（比如划走又划回来），直接补一次播放
+            if photo != nil {
+                model.markReady(true)
+                model.playOnce()
+            }
+            return
+        }
+        loading = true
+        let myToken = UUID()
+        token = myToken
+
+        LivePhotoLoader.load(asset: asset) { loaded in
+            guard token == myToken else { return }
+            loading = false
+            guard let loaded = loaded else { return }   // 只有静帧：静默降级成普通照片
+            photo = loaded
+            model.markReady(true)
+            // 取图可能要几秒（iCloud）。用户早划走了就别突然动起来。
+            guard isActive else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                model.playOnce()
+            }
+        }
+    }
+
+    private func teardown() {
+        model.reset()
+        token = UUID()
+        loading = false
+        // 释放视频轨。不置 nil 的话，划过的每一张 Live 都会一直占着内存。
+        photo = nil
     }
 }
 
@@ -410,6 +646,7 @@ struct PhotoPreviewView: View {
 
     @State private var index: Int
     @StateObject private var video = VideoPlaybackModel()
+    @StateObject private var live = LivePhotoModel()
 
     @Environment(\.dismiss) private var dismiss
 
@@ -434,6 +671,11 @@ struct PhotoPreviewView: View {
         current?.isVideo ?? false
     }
 
+    private var isLivePage: Bool {
+        guard let item = current else { return false }
+        return !item.isVideo && item.isLivePhoto
+    }
+
     var body: some View {
         ZStack {
             Color.black.ignoresSafeArea()
@@ -446,6 +688,9 @@ struct PhotoPreviewView: View {
                     ForEach(Array(items.enumerated()), id: \.element.id) { idx, item in
                         if item.isVideo {
                             VideoStage(asset: item.asset, isActive: idx == index, model: video)
+                                .tag(idx)
+                        } else if item.isLivePhoto {
+                            LivePhotoStage(asset: item.asset, isActive: idx == index, model: live)
                                 .tag(idx)
                         } else {
                             ZoomableImageView(asset: item.asset)
@@ -462,6 +707,8 @@ struct PhotoPreviewView: View {
                 Spacer()
                 if isVideoPage {
                     videoControls
+                } else if isLivePage {
+                    liveControls
                 }
                 bottomInfo
                 actionBar
@@ -470,7 +717,19 @@ struct PhotoPreviewView: View {
         .statusBarHidden(true)
         .onAppear { syncVideo() }
         .onChange(of: index) { _ in syncVideo() }
-        .onDisappear { video.stop() }
+        // 静音是「这次预览」的偏好，不是某一段视频的：视频里开过声音，
+        // 翻到 Live 也该有声，反过来也一样。两边互为镜像，值相同就不再写，
+        // 所以不会来回震荡。
+        .onChange(of: video.isMuted) { value in
+            if live.isMuted != value { live.isMuted = value }
+        }
+        .onChange(of: live.isMuted) { value in
+            if video.isMuted != value { video.isMuted = value }
+        }
+        .onDisappear {
+            video.stop()
+            live.reset()
+        }
     }
 
     // MARK: 顶栏
@@ -565,6 +824,54 @@ struct PhotoPreviewView: View {
         .padding(.bottom, 8)
     }
 
+    // MARK: Live 控制条（只在当前页是 Live 照片时出现）
+
+    /// 没有进度条：Live 一共三秒，给个滑块只会挡画面。
+    /// 只留「重播」和「喇叭」，位置和视频那颗播放键对齐，切页时不会跳。
+    private var liveControls: some View {
+        HStack(spacing: 16) {
+            Button {
+                // 播放中再点也是「从头再播」——这个按钮的语义是重播，不是暂停。
+                live.playOnce()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "livephoto")
+                        .font(.system(size: 14, weight: .semibold))
+                    Text("LIVE")
+                        .font(.system(size: 11, weight: .heavy))
+                        .tracking(0.6)
+                }
+                .foregroundColor(.white)
+                .padding(.horizontal, 13)
+                .padding(.vertical, 10)
+                .background(Capsule().fill(Color.white.opacity(live.isPlaying ? 0.30 : 0.16)))
+                .overlay(Capsule().stroke(Color.white.opacity(0.55), lineWidth: 0.8))
+            }
+            .buttonStyle(.plain)
+            .disabled(!live.isReady)
+            .opacity(live.isReady ? 1 : 0.45)
+            .accessibilityLabel("重播 Live 照片")
+            .accessibilityIdentifier("live-replay")
+
+            Button {
+                live.toggleMute()
+            } label: {
+                Image(systemName: live.isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundColor(.white)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(Color.white.opacity(0.16)))
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(live.isMuted ? "取消静音" : "静音")
+            .accessibilityIdentifier("live-mute")
+
+            Spacer(minLength: 0)
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 8)
+    }
+
     // MARK: 底部信息
 
     @ViewBuilder
@@ -578,6 +885,11 @@ struct PhotoPreviewView: View {
                         Text("视频 " + timeText(item.asset.duration))
                     } else {
                         Text(item.resolutionText)
+                        if item.isLivePhoto {
+                            Text("·")
+                            Text("LIVE")
+                                .fontWeight(.semibold)
+                        }
                     }
                     if !item.sizeText.isEmpty {
                         Text("·")
