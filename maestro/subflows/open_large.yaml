@@ -6,21 +6,35 @@ name: 共用 - 打开大文件页
 # 「大文件」整个在屏幕外 —— 无障碍树里根本没有它，tapOn 必然失败。
 # 空间看板底部那个「去看大文件」按钮一直在屏幕内，是更稳的入口。
 #
-# 落地后顺便切到「单列」：只有大文件页会显示「按体积从大到小 · 共 X」，
-# 用它来确认确实停在了这一页，比断言标签文字可靠。
+# 落地后切到「单列」：只有大文件页会显示「按体积从大到小 · 共 X」，
+# 用它确认确实停在了这一页。
 - runFlow: scan.yaml
 
 - tapOn: "空间"
 - extendedWaitUntil:
     visible: "去看大文件.*"
-    timeout: 10000
+    timeout: 15000
 - takeScreenshot: 01_dashboard
-- tapOn: "去看大文件.*"
 
-- extendedWaitUntil:
-    visible: "单列"
-    timeout: 10000
-- tapOn: "单列"
-- extendedWaitUntil:
-    visible: "按体积从大到小.*"
-    timeout: 10000
+# run #27 就是这么挂的，记一笔：
+# 扫完刚拿到权限那一轮，内容识别还在跑、界面层级一直在变，
+# 「去看大文件」这一下会被吞掉 —— 页签没换，人还留在「清理」页。
+# 更坑的是「单列」在清理页上也有一模一样的按钮，断言照样能过，
+# 于是后面全部错位（最后一下点在照片上，把一张图选中了）。
+# 所以把「回看板 → 进大文件 → 切单列 → 见到列表头」绑成一组整组重试，
+# 每一步都幂等：已经在目标页就什么都不做，只有最后那个断言是门槛。
+- retry:
+    maxRetries: 3
+    commands:
+      - tapOn:
+          text: "空间"
+          optional: true
+      - tapOn:
+          text: "去看大文件.*"
+          optional: true
+      - tapOn:
+          text: "单列"
+          optional: true
+      - extendedWaitUntil:
+          visible: "按体积从大到小.*"
+          timeout: 10000

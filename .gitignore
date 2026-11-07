@@ -22,6 +22,9 @@ xcuserdata/
 
 # 本地排查用的临时产物
 _ci_artifacts/
+_ci_pick/
+_ci_grab.py
+_ci_pick.py
 _joblog.txt
 __pycache__/
 .venv-shots/
